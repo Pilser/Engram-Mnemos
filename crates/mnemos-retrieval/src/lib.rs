@@ -110,6 +110,33 @@ fn get_engram_activation(engram_id: i64) {
         .returning(["engram"])
 }
 
+/// Read one full engram row (wave-merge phase of `recall_stimulated`).
+///
+/// Projects every field [`compute_resonance_with_alignment`] needs so
+/// wave-discovered engrams score with real data, never synthetic placeholders.
+#[query]
+fn get_engram_full(engram_id: i64) {
+    // See `get_engram_activation` for why this binding is referenced.
+    let _ = &engram_id;
+    read_batch()
+        .var_as(
+            "engram",
+            g().n(NodeRef::param("engram_id")).value_map(Some(vec![
+                "$id",
+                "episode_raw",
+                "emotional_charge",
+                "importance_score",
+                "decay_rate",
+                "activation_count",
+                "timestamp",
+                "engram_type",
+                "compression_level",
+                "contradiction_flag",
+            ])),
+        )
+        .returning(["engram"])
+}
+
 /// Write back one engram's `activation_count` (recall activation bump).
 #[query]
 fn set_engram_activation(engram_id: i64, activation_count: i64) {
@@ -616,28 +643,72 @@ impl RetrievalPipeline {
             }
             wave_ids = next_ids;
         }
-        // Merge: fetch episode data for wave-discovered engrams not in seed?
-        // For now, synthesize minimal ResonanceResults for wave nodes by fetching
-        // their engram data via a simple read (best-effort, skip on failure).
-        // To keep this method testable offline, we surface wave ids as attenuated scores
-        // without extra DB reads if the seed already covered them; otherwise we append
-        // synthetic entries with attenuated resonance.
+        // Merge: wave-discovered engrams NOT in seed get real rows fetched
+        // (episode text + metadata) and honest resonance from transferred
+        // activation × identity alignment × contradiction penalty. Nodes that
+        // fail to fetch are skipped (best-effort) and counted in telemetry.
+        let now_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        let mut wave_added = 0_usize;
+        let mut wave_skipped = 0_usize;
         for (id, act) in &seen {
             if seed_results.iter().any(|r| &r.engram_id == id) {
                 continue;
             }
-            // Synthetic wave-discovered entry (attenuated, no DB fetch to stay offline-friendly).
+            let node_param = i64::try_from(*id).unwrap_or(i64::MAX);
+            let Ok(read_req) = get_engram_full(node_param) else {
+                wave_skipped += 1;
+                continue;
+            };
+            let Ok(row_resp) = self
+                .storage
+                .client()
+                .query::<serde_json::Value>(read_req)
+                .send()
+                .await
+            else {
+                wave_skipped += 1;
+                continue;
+            };
+            let Some(row) = row_resp.get("engram").and_then(|v| v.get(0)) else {
+                wave_skipped += 1;
+                continue;
+            };
+            let Ok(candidate) = serde_json::from_value::<EngramCandidate>(row.clone()) else {
+                wave_skipped += 1;
+                continue;
+            };
+            let identity_alignment = identity_alignment_for(&self.storage, *id).await;
+            let contradiction_factor = if candidate.contradiction_flag {
+                0.5
+            } else {
+                1.0
+            };
+            let engram_ts = mnemos_core::parse_timestamp_rfc3339(&candidate.timestamp);
+            let days_elapsed = (now_unix_secs - engram_ts) / 86400.0;
+            let recency = (-candidate.decay_rate * days_elapsed).exp().max(0.01);
             seed_results.push(ResonanceResult {
                 engram_id: *id,
-                resonance_score: *act * 0.5, // wave attenuation
-                episode_raw: format!("[wave-discovered engram {id}]"),
-                emotional_charge: 0.0,
-                importance_score: 0.5,
-                identity_alignment: 1.0,
-                semantic_sim: 0.5,
-                recency_weight: 1.0,
+                // Transferred activation already encodes the path
+                // (seed semantic × edge weights × decay); identity and
+                // contradiction shape it like the CRR factors.
+                resonance_score: act * identity_alignment * contradiction_factor,
+                episode_raw: candidate.episode_raw,
+                emotional_charge: candidate.emotional_charge,
+                importance_score: candidate.importance_score,
+                identity_alignment,
+                semantic_sim: 1.0 - candidate.distance,
+                recency_weight: recency,
             });
+            wave_added += 1;
         }
+        mnemos_telemetry::global().record(
+            "mnemos-retrieval",
+            "recall_stimulated.wave",
+            true,
+            &format!("added={wave_added} skipped={wave_skipped}"),
+        );
         // Resort and truncate to limit.
         seed_results.sort_by(|a, b| {
             b.resonance_score

@@ -253,12 +253,26 @@ impl Cli {
 
     /// Recall the top-`limit` memories for `query`.
     ///
+    /// When `MNEMOS_RECALL_WAVE=1/true/yes/on`, routes through the spreading
+    /// activation wave (`recall_stimulated`: seed CRR → spread across
+    /// `Reinforces`/`TemporalSequence`/`Contradicts` via learned edge weights
+    /// → merge real rows) so rewarded weights visibly shape ranking.
+    /// Default off: single-pass CRR (faster, no extra neighbor queries).
+    ///
     /// # Errors
     ///
     /// Returns [`MnemosError`] when embedding, query building, the vector
     /// search, or candidate decoding fails.
     pub async fn recall(&self, query: &str, limit: usize) -> Result<Vec<ResonanceResult>> {
-        self.retrieval.lock().await.recall(query, limit).await
+        if Self::wave_enabled() {
+            self.retrieval
+                .lock()
+                .await
+                .recall_stimulated(query, limit)
+                .await
+        } else {
+            self.retrieval.lock().await.recall(query, limit).await
+        }
     }
 
     /// Protocol `recall`: oversampled recall formatted as memory snippets.
@@ -355,6 +369,17 @@ impl Cli {
     /// Last ledger recall id, if at least one `recall` ran (always on now).
     pub async fn last_recall_id(&self) -> Option<u64> {
         self.retrieval.lock().await.last_recall_id()
+    }
+
+    /// Whether spreading-activation recall is enabled
+    /// (`MNEMOS_RECALL_WAVE=1/true/yes/on`, default off).
+    fn wave_enabled() -> bool {
+        std::env::var("MNEMOS_RECALL_WAVE").ok().is_some_and(|v| {
+            matches!(
+                v.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
     }
 
     /// Run one consolidation ("sleep") cycle.
