@@ -253,11 +253,11 @@ impl Cli {
 
     /// Recall the top-`limit` memories for `query`.
     ///
-    /// When `MNEMOS_RECALL_WAVE=1/true/yes/on`, routes through the spreading
-    /// activation wave (`recall_stimulated`: seed CRR → spread across
+    /// Always routes through the spreading activation wave
+    /// (`recall_stimulated`: seed CRR → spread across
     /// `Reinforces`/`TemporalSequence`/`Contradicts` via learned edge weights
     /// → merge real rows) so rewarded weights visibly shape ranking.
-    /// Default off: single-pass CRR (faster, no extra neighbor queries).
+    /// Set `MNEMOS_RECALL_WAVE=0/false/no/off` to revert to single-pass CRR.
     ///
     /// # Errors
     ///
@@ -371,24 +371,29 @@ impl Cli {
         self.retrieval.lock().await.last_recall_id()
     }
 
-    /// Whether spreading-activation recall is enabled
-    /// (`MNEMOS_RECALL_WAVE=1/true/yes/on`, default off).
+    /// Whether spreading-activation recall is enabled (always on unless
+    /// `MNEMOS_RECALL_WAVE=0/false/no/off` explicitly disables it).
     fn wave_enabled() -> bool {
-        std::env::var("MNEMOS_RECALL_WAVE").ok().is_some_and(|v| {
-            matches!(
+        match std::env::var("MNEMOS_RECALL_WAVE").ok().as_deref().map(str::trim) {
+            None | Some("") => true,
+            Some(v) => !matches!(
                 v.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+                "0" | "false" | "no" | "off"
+            ),
+        }
     }
 
     /// Run one consolidation ("sleep") cycle.
+    ///
+    /// Runs the aggressive path (mitosis splits + contradiction resolution +
+    /// identity crystallization) so capabilities stay utilized. Use
+    /// `consolidation.consolidate()` directly for decay-only.
     ///
     /// # Errors
     ///
     /// Returns [`MnemosError::Storage`] when any `HelixDB` query fails.
     pub async fn consolidate(&self) -> Result<ConsolidationReport> {
-        self.consolidation.consolidate().await
+        self.consolidate_aggressive(true).await
     }
 
     /// Protocol `consolidate` with an `aggressive` flag.
