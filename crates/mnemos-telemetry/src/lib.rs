@@ -145,7 +145,7 @@ struct Inner {
 
 impl Telemetry {
     /// Build from env: `MNEMOS_TELEMETRY` (`1`/`true`/`yes`, default on),
-    /// `MNEMOS_TELEMETRY_FILE` (JSONL append sink, default `./data/helix/mnemos-telemetry.jsonl`).
+    /// `MNEMOS_TELEMETRY_FILE` (JSONL append sink, default off — set via env or `.env` next to binary).
     #[must_use]
     pub fn from_env() -> Self {
         let enabled = std::env::var("MNEMOS_TELEMETRY").ok().is_none_or(|v| {
@@ -153,8 +153,7 @@ impl Telemetry {
         });
         let file_path = std::env::var("MNEMOS_TELEMETRY_FILE")
             .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| Some("./data/helix/mnemos-telemetry.jsonl".to_string()));
+            .filter(|s| !s.is_empty());
         Self::new(enabled, file_path)
     }
 

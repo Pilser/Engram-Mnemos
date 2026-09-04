@@ -80,7 +80,6 @@ impl StorageConfig {
         Self {
             url: std::env::var("HELIX_URL")
                 .unwrap_or_else(|_| "http://localhost:6969".to_string()),
-            // Docker-friendly: mount a volume at this path to persist.
             data_root: std::env::var("MNEMOS_DATA_ROOT")
                 .unwrap_or_else(|_| "./data/helix".to_string()),
             database: std::env::var("MNEMOS_DATABASE")

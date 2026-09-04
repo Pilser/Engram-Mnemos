@@ -30,13 +30,14 @@ use mnemos_retrieval::RetrievalPipeline;
 use mnemos_stimulation::StimulationEngine;
 use mnemos_storage::Storage;
 
-/// Load env files if present: `.env`, `deploy/.env`, `local/.env` (all optional, gitignored deploy/local take precedence).
+/// Load env files if present: `.env` next to binary and `.env` in current dir. All optional.
 fn load_env_files() {
-    let _ = dotenvy::dotenv(); // .env at repo root
-    // deploy/.env and local/.env override .env when present
-    let _ = dotenvy::from_filename_override("deploy/.env");
-    let _ = dotenvy::from_filename_override("local/.env");
-    let _ = dotenvy::from_filename_override(".env.local");
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let _ = dotenvy::from_filename_override(dir.join(".env"));
+        }
+    }
+    let _ = dotenvy::dotenv();
 }
 
 /// Default result count for `engram recall` when `--limit` is omitted.
