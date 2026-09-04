@@ -396,7 +396,17 @@ async fn try_daemon(command: &Command) -> Option<i32> {
 /// `/health`, `/telemetry*`) forever, and runs background consolidation when
 /// `MNEMOS_CONSOLIDATE_INTERVAL_SECS > 0`.
 async fn serve_forever(config: &MnemosConfig) -> i32 {
-    let cli = match build_cli(config).await {
+    // Single embedded open per process: Helix invalidates older handles when
+    // the same Disk path is opened twice ("newer DB client"), so every
+    // pipeline and tool shares clones of this one handle.
+    let storage = match Storage::from_config(&config.storage).await {
+        Ok(s) => s,
+        Err(error) => {
+            eprintln!("engram: error: {error}");
+            return 1;
+        }
+    };
+    let cli = match build_cli(config, storage.clone()).await {
         Ok(cli) => cli,
         Err(message) => {
             eprintln!("engram: error: {message}");
@@ -432,8 +442,9 @@ async fn serve_forever(config: &MnemosConfig) -> i32 {
         });
         eprintln!("engram: background consolidate every {interval_secs}s");
     }
-    // Protocol tools need their own provider handles (cheap HTTP clients).
-    let protocol = match build_protocol_tools(&cli, config).await {
+    // Protocol tools need their own provider handles (cheap HTTP clients)
+    // but share the daemon's single storage handle (see above).
+    let protocol = match build_protocol_tools(&cli, config, storage).await {
         Ok(p) => p,
         Err(message) => {
             eprintln!("engram: error: {message}");
@@ -453,10 +464,8 @@ async fn serve_forever(config: &MnemosConfig) -> i32 {
 async fn build_protocol_tools(
     cli: &Arc<Cli>,
     config: &MnemosConfig,
+    storage: Storage,
 ) -> Result<ProtocolTools, String> {
-    let storage = Storage::from_config(&config.storage)
-        .await
-        .map_err(|error| error.to_string())?;
     let llm = &config.llm;
     Ok(ProtocolTools::new(
         Arc::clone(cli),
@@ -469,12 +478,10 @@ async fn build_protocol_tools(
 
 /// Assemble all pipelines behind one [`Cli`] facade.
 ///
-/// One handle is built (embedded disk/memory openers perform real I/O here)
-/// and cloned for the three pipelines plus the facade's own stats handle.
-async fn build_cli(config: &MnemosConfig) -> Result<Arc<Cli>, String> {
-    let storage = Storage::from_config(&config.storage)
-        .await
-        .map_err(|error| error.to_string())?;
+/// Takes an already-opened [`Storage`] handle and clones it for the three
+/// pipelines plus the facade's own stats handle — never opens twice (see
+/// `serve_forever`).
+async fn build_cli(config: &MnemosConfig, storage: Storage) -> Result<Arc<Cli>, String> {
 
     // Each ML model needs its own `Box<dyn LlmProvider>`; the providers are
     // cheap HTTP clients, so one is built per model.
@@ -585,7 +592,14 @@ async fn dispatch(command: Command) -> i32 {
         );
         return 1;
     }
-    let cli = match build_cli(&config).await {
+    let storage = match Storage::from_config(&config.storage).await {
+        Ok(s) => s,
+        Err(error) => {
+            eprintln!("engram: error: {error}");
+            return 1;
+        }
+    };
+    let cli = match build_cli(&config, storage).await {
         Ok(cli) => cli,
         Err(message) => {
             eprintln!("engram: error: {message}");
