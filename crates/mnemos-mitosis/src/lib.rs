@@ -137,6 +137,14 @@ impl MitosisSplitter {
             .await
             .map_err(storage_error)?;
         let engrams: Vec<EngramWithEmbedding> = response_rows(&response, "engrams");
+        // Prove real vectors arrived from the DB (not empty/default rows).
+        let dim = engrams.first().map(|e| e.embedding.len()).unwrap_or(0);
+        mnemos_telemetry::global().record(
+            "mnemos-mitosis",
+            "fetch_engrams",
+            true,
+            &format!("concept={concept_id} engrams={} dim={dim}", engrams.len()),
+        );
 
         if engrams.len() < 2 {
             return Ok(MitosisReport {
@@ -150,6 +158,22 @@ impl MitosisSplitter {
         // 2. Cluster embeddings.
         let embeddings: Vec<Vec<f32>> = engrams.iter().map(|e| e.embedding.clone()).collect();
         let labels = Self::cluster_embeddings(&embeddings, min_cluster_size);
+        mnemos_telemetry::global().record(
+            "mnemos-mitosis",
+            "cluster",
+            true,
+            &format!(
+                "concept={concept_id} points={} distinct_labels={}",
+                labels.len(),
+                {
+                    let mut s = std::collections::HashSet::new();
+                    for l in &labels {
+                        s.insert(*l);
+                    }
+                    s.len()
+                }
+            ),
+        );
 
         // 3. Group engrams by cluster label.
         let mut cluster_map: HashMap<i64, Vec<usize>> = HashMap::new();
