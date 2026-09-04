@@ -8,7 +8,7 @@
 //! OpenAI-provider dimension) is **1536**.
 //!
 //! **Do NOT mix vector stores between providers.** A store populated with
-//! 1536-dim OpenAI embeddings cannot be queried with 384-dim local
+//! 1536-dim `OpenAI` embeddings cannot be queried with 384-dim local
 //! embeddings and vice versa. Pick one provider per store.
 //!
 //! # fastembed 6.0.2 API findings (verified against
@@ -61,7 +61,7 @@ use mnemos_embedding_trait::EmbeddingProvider;
 /// ([`fastembed::EmbeddingModel::AllMiniLML6V2`]).
 ///
 /// Deliberately **not** [`mnemos_core::EMBEDDING_DIM`] (1536): local and
-/// OpenAI vectors must never share a store.
+/// `OpenAI` vectors must never share a store.
 pub const LOCAL_EMBEDDING_DIM: usize = 384;
 
 /// Local embedding provider using an on-device `fastembed` model.
@@ -156,7 +156,7 @@ impl EmbeddingProvider for LocalEmbeddingProvider {
             "mnemos-embedding-local",
             "embed",
             out.is_ok(),
-            &out.as_ref().map_or_else(|e| e.to_string(), |v| format!("{} dim", v.len())),
+            &out.as_ref().map_or_else(std::string::ToString::to_string, |v| format!("{} dim", v.len())),
             ms,
         );
         out

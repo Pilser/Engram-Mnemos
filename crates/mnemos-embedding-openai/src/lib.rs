@@ -150,7 +150,7 @@ impl mnemos_embedding_trait::EmbeddingProvider for OpenAiEmbeddingProvider {
             "mnemos-embedding-openai",
             "embed",
             out.is_ok(),
-            &out.as_ref().map_or_else(|e| e.to_string(), |v| format!("{} dim", v.len())),
+            &out.as_ref().map_or_else(std::string::ToString::to_string, |v| format!("{} dim", v.len())),
             ms,
         );
         out

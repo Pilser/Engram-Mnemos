@@ -212,7 +212,7 @@ impl ContradictionDetector {
     /// # Errors
     ///
     /// Returns [`MnemosError::Storage`] when id conversion, query building,
-    /// or any HelixDB request fails, and propagates [`Self::verify_pair`]
+    /// or any `HelixDB` request fails, and propagates [`Self::verify_pair`]
     /// LLM failures.
     pub async fn scan_concept(
         &self,
@@ -316,7 +316,7 @@ struct EngramRow {
 }
 
 /// Convert a `u64` node id to the `i64` query param the `#[query]` macro
-/// accepts (the macro rejects `u64`; HelixDB ids always fit in `i64`).
+/// accepts (the macro rejects `u64`; `HelixDB` ids always fit in `i64`).
 fn node_param(id: u64) -> Result<i64> {
     i64::try_from(id).map_err(|_| MnemosError::Storage(format!("node id out of range: {id}")))
 }
@@ -495,7 +495,7 @@ mod tests {
     }
 
     /// Live end-to-end scan: embedding filter → LLM verify → `Contradicts`
-    /// edge + flags. Requires a running HelixDB with the MNEMOS schema and
+    /// edge + flags. Requires a running `HelixDB` with the MNEMOS schema and
     /// a concept with recalling engrams.
     #[tokio::test]
     #[ignore = "needs live HelixDB at HELIX_URL (default http://localhost:6969)"]

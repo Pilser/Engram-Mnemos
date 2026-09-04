@@ -556,7 +556,7 @@ mod tests {
     fn consolidate_aggressive_defaults_to_false() {
         let params: ConsolidateParams = serde_json::from_value(json!({}))
             .expect("empty consolidate params must deserialize");
-        assert_eq!(params.aggressive.unwrap_or(false), false);
+        assert!(!params.aggressive.unwrap_or(false));
         let params: ConsolidateParams =
             serde_json::from_value(json!({ "aggressive": true }))
                 .expect("explicit consolidate params must deserialize");

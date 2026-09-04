@@ -18,6 +18,7 @@ impl LlmImportanceScorer {
     /// # Errors
     ///
     /// This constructor never fails; it only stores the provider.
+    #[must_use]
     pub fn new(llm: Box<dyn mnemos_llm_trait::LlmProvider>) -> Self {
         Self { llm }
     }

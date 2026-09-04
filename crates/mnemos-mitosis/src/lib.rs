@@ -77,7 +77,7 @@ impl MitosisSplitter {
     /// Split one overloaded concept into child concepts.
     ///
     /// Steps:
-    /// 1. Fetch engrams recalling `concept_id` (with embeddings + episode_raw).
+    /// 1. Fetch engrams recalling `concept_id` (with embeddings + `episode_raw`).
     /// 2. Cluster embeddings via [`Self::cluster_embeddings`].
     /// 3. Edge cases per reference doc: 0–1 clusters → no split (return zeros);
     ///    cap children to `max_children` largest clusters; clusters smaller
@@ -90,7 +90,7 @@ impl MitosisSplitter {
     ///
     /// # Errors
     ///
-    /// Returns [`MnemosError::Storage`] when any HelixDB request fails.
+    /// Returns [`MnemosError::Storage`] when any `HelixDB` request fails.
     pub async fn split_concept(
         &self,
         storage: &Storage,
@@ -397,7 +397,7 @@ fn extract_json(raw: &str) -> Option<&str> {
 // HelixDB queries
 // ---------------------------------------------------------------------------
 
-/// Fetch engrams recalling `concept_id` with embeddings + episode_raw.
+/// Fetch engrams recalling `concept_id` with embeddings + `episode_raw`.
 ///
 /// Traverses incoming `Recalls` edges from the concept (edge direction is
 /// `Engram -Recalls-> Concept`, see `mnemos-ingestion`).
@@ -571,7 +571,7 @@ fn json_id(value: &serde_json::Value) -> Option<u64> {
     None
 }
 
-/// Extract a created node's id from a HelixDB JSON response.
+/// Extract a created node's id from a `HelixDB` JSON response.
 fn parse_node_id(response: &serde_json::Value) -> Result<EngramId> {
     if let Some(id) = response.get("$id").and_then(json_id) {
         return Ok(id);

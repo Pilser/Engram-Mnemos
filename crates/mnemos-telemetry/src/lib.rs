@@ -52,7 +52,7 @@ pub struct Event {
     /// Optional trace correlation id linking recall→reward→consolidate for one session.
     #[serde(default)]
     pub trace_id: String,
-    /// Structured meta for filtering (model, recall_id, tokens, query_len, etc.).
+    /// Structured meta for filtering (model, `recall_id`, tokens, `query_len`, etc.).
     #[serde(default)]
     pub meta: HashMap<String, String>,
 }
@@ -69,6 +69,7 @@ pub struct Counter {
 }
 
 impl Counter {
+    #[must_use]
     pub fn avg_latency(&self) -> f64 {
         if self.total == 0 {
             0.0
@@ -145,8 +146,9 @@ struct Inner {
 impl Telemetry {
     /// Build from env: `MNEMOS_TELEMETRY` (`1`/`true`/`yes`, default on),
     /// `MNEMOS_TELEMETRY_FILE` (JSONL append sink, default off).
+    #[must_use]
     pub fn from_env() -> Self {
-        let enabled = std::env::var("MNEMOS_TELEMETRY").ok().map_or(true, |v| {
+        let enabled = std::env::var("MNEMOS_TELEMETRY").ok().is_none_or(|v| {
             matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
         });
         let file_path = std::env::var("MNEMOS_TELEMETRY_FILE")
@@ -156,6 +158,7 @@ impl Telemetry {
     }
 
     /// Build explicitly (tests, embedding in other config systems).
+    #[must_use]
     pub fn new(enabled: bool, file_path: Option<String>) -> Self {
         Self {
             inner: Mutex::new(Inner {

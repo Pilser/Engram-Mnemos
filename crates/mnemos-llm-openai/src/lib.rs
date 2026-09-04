@@ -90,7 +90,7 @@ impl OpenAiCompatibleProvider {
             "mnemos-llm-openai",
             if json_mode { "llm.chat_json" } else { "llm.chat" },
             out.is_ok(),
-            &out.as_ref().map_or_else(|e| e.to_string(), |s| {
+            &out.as_ref().map_or_else(std::string::ToString::to_string, |s| {
                 format!("{} chars", s.len())
             }),
             elapsed_ms(start),
@@ -142,8 +142,7 @@ impl OpenAiCompatibleProvider {
                             continue;
                         }
                         return Err(MnemosError::Llm(format!(
-                            "HTTP {status} after {} retries",
-                            attempt
+                            "HTTP {status} after {attempt} retries"
                         )));
                     }
                     // Client error — don't retry.
@@ -160,15 +159,13 @@ impl OpenAiCompatibleProvider {
                         continue;
                     }
                     return Err(MnemosError::Http(format!(
-                        "transport error after {} retries: {}",
-                        attempt, last_err
+                        "transport error after {attempt} retries: {last_err}"
                     )));
                 }
             }
         }
         Err(MnemosError::Http(format!(
-            "exhausted retries: {}",
-            last_err
+            "exhausted retries: {last_err}"
         )))
     }
 }

@@ -6,7 +6,7 @@
 //! directly on the node) plus one `Concept` node per extracted concept,
 //! linked by `Recalls` and `AbstractsTo` edges.
 //!
-//! All HelixDB queries are built with the `#[query]` macro from
+//! All `HelixDB` queries are built with the `#[query]` macro from
 //! `helix_db::dsl::prelude::*` and executed via
 //! `storage.client().query(request).send().await`. Responses are parsed
 //! as `serde_json::Value` with the node `$id` extracted by pointer;
@@ -98,7 +98,7 @@ impl IngestionPipeline {
     /// # Errors
     ///
     /// Returns [`mnemos_core::MnemosError`] when any ML provider fails or
-    /// when a HelixDB request fails or its response lacks a node `$id`.
+    /// when a `HelixDB` request fails or its response lacks a node `$id`.
     pub async fn ingest(
         &self,
         text: &str,
@@ -119,7 +119,7 @@ impl IngestionPipeline {
     /// # Errors
     ///
     /// Returns [`mnemos_core::MnemosError`] when any ML provider fails or
-    /// when a HelixDB request fails or its response lacks a node `$id`.
+    /// when a `HelixDB` request fails or its response lacks a node `$id`.
     pub async fn ingest_with_importance(
         &self,
         text: &str,
@@ -239,20 +239,17 @@ impl IngestionPipeline {
         concept_id: EngramId,
         known_source_count: Option<i64>,
     ) -> mnemos_core::Result<()> {
-        let current = match known_source_count {
-            Some(count) => count,
-            None => {
-                let request =
-                    get_concept_source_count(to_i64(concept_id)?).map_err(storage_error)?;
-                let response: serde_json::Value = self
-                    .storage
-                    .client()
-                    .query(request)
-                    .send()
-                    .await
-                    .map_err(storage_error)?;
-                parse_source_count(&response).unwrap_or(0)
-            }
+        let current = if let Some(count) = known_source_count { count } else {
+            let request =
+                get_concept_source_count(to_i64(concept_id)?).map_err(storage_error)?;
+            let response: serde_json::Value = self
+                .storage
+                .client()
+                .query(request)
+                .send()
+                .await
+                .map_err(storage_error)?;
+            parse_source_count(&response).unwrap_or(0)
         };
         let request = set_concept_source_count(to_i64(concept_id)?, current.saturating_add(1))
             .map_err(storage_error)?;
@@ -446,7 +443,7 @@ fn connect_abstracts_to_edge(from_id: i64, to_id: i64) {
 /// # Errors
 ///
 /// Returns [`mnemos_core::MnemosError`] on unknown labels, id overflow,
-/// or HelixDB request failure.
+/// or `HelixDB` request failure.
 async fn connect_edge(
     storage: &Storage,
     from_id: u64,
@@ -478,7 +475,7 @@ fn storage_error<E: std::fmt::Display>(error: E) -> MnemosError {
 }
 
 /// Convert a node id to the `i64` query param the `#[query]` macro accepts
-/// (the macro rejects `u64`; HelixDB ids always fit in `i64`).
+/// (the macro rejects `u64`; `HelixDB` ids always fit in `i64`).
 fn to_i64(id: u64) -> mnemos_core::Result<i64> {
     i64::try_from(id)
         .map_err(|_| MnemosError::Internal(format!("node id overflow: {id}")))
@@ -508,7 +505,7 @@ fn json_id(value: &serde_json::Value) -> Option<u64> {
     None
 }
 
-/// Extract a created node's id from a HelixDB JSON response.
+/// Extract a created node's id from a `HelixDB` JSON response.
 ///
 /// Handles `{"$id": …}` directly as well as batched shapes like
 /// `{"engram": [{"$id": …}]}`, falling back to `"id"` keys.
@@ -939,7 +936,7 @@ mod tests {
         }
 
         let storage = Storage::new("http://localhost:6969", "mnemos").unwrap();
-        let before = lookup(&storage).await.map(|(_, c)| c.unwrap_or(0)).unwrap_or(0);
+        let before = lookup(&storage).await.map_or(0, |(_, c)| c.unwrap_or(0));
 
         let storage = Storage::new("http://localhost:6969", "mnemos").unwrap();
         let pipeline = IngestionPipeline::new(

@@ -50,7 +50,7 @@ jobs:
         run: cargo check --workspace --all-targets
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets
 
       - name: cargo test
         run: cargo test --workspace

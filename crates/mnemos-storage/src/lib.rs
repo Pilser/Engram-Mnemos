@@ -1,4 +1,4 @@
-//! mnemos-storage: HelixDB client wrapper (HTTP + embedded).
+//! mnemos-storage: `HelixDB` client wrapper (HTTP + embedded).
 //!
 //! Backend is selected by [`StorageConfig::backend`]:
 //! - [`StorageBackend::Http`] — `Client::new(url)`, talks to a Helix server.
@@ -19,7 +19,7 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Build an HTTP client against the HelixDB endpoint at `url`.
+    /// Build an HTTP client against the `HelixDB` endpoint at `url`.
     ///
     /// No network I/O — only parses the URL and constructs the client.
     pub fn new(url: &str, database: &str) -> mnemos_core::Result<Self> {
@@ -116,7 +116,7 @@ impl Storage {
         outcome
     }
 
-    /// Borrow the underlying HelixDB client.
+    /// Borrow the underlying `HelixDB` client.
     #[must_use]
     pub fn client(&self) -> &Client {
         &self.client

@@ -433,8 +433,7 @@ impl RetrievalPipeline {
         // sequential awaits are fine.
         let now_unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
+            .map_or(0.0, |d| d.as_secs_f64());
         let mut alignments = Vec::with_capacity(candidates.len());
         for c in &candidates {
             alignments.push(identity_alignment_for(&self.storage, c.id).await);
@@ -587,7 +586,7 @@ impl RetrievalPipeline {
         // To keep this method testable offline, we surface wave ids as attenuated scores
         // without extra DB reads if the seed already covered them; otherwise we append
         // synthetic entries with attenuated resonance.
-        for (id, act) in seen.iter() {
+        for (id, act) in &seen {
             if seed_results.iter().any(|r| &r.engram_id == id) {
                 continue;
             }
@@ -665,6 +664,7 @@ impl RetrievalPipeline {
     }
 
     /// Last ledger recall id, if ledger is enabled and at least one recall ran.
+    #[must_use]
     pub fn last_recall_id(&self) -> Option<u64> {
         if !Self::ledger_enabled() || self.ledger.is_empty() {
             return None;
@@ -803,7 +803,7 @@ mod tests {
                 { "value": 0.6, "stability": 0.4 },
             ]
         });
-        let want = (0.8 * 0.9 + 0.6 * 0.4) / 2.0;
+        let want = f64::midpoint(0.8 * 0.9, 0.6 * 0.4);
         let got = alignment_from_traits_response(&response);
         assert!((got - want).abs() < 1e-12, "got {got}, want {want}");
     }
@@ -887,7 +887,7 @@ mod tests {
     }
 
     /// Live round-trip: vector search -> CRR -> activation bump -> reward.
-    /// Requires a running HelixDB with the MNEMOS schema + vector index.
+    /// Requires a running `HelixDB` with the MNEMOS schema + vector index.
     #[tokio::test]
     #[ignore = "needs live HelixDB at HELIX_URL (default http://localhost:6969)"]
     async fn recall_and_reward_against_live_db() {
@@ -910,7 +910,7 @@ mod tests {
 
     /// Live cognitive chain: Engram -> Recalls -> Concepts -> Defines ->
     /// Identity traits folded to a unit-range alignment. Requires a running
-    /// HelixDB with the MNEMOS schema (an engram with id 1 need not exist:
+    /// `HelixDB` with the MNEMOS schema (an engram with id 1 need not exist:
     /// unlinked ids fall back to neutral 1.0).
     #[tokio::test]
     #[ignore = "needs live HelixDB at HELIX_URL (default http://localhost:6969)"]

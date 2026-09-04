@@ -19,6 +19,11 @@ impl MnemosConfig {
     /// Load from env vars with sensible local defaults.
     /// `HELIX_URL` (default `http://localhost:6969`),
     /// `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `LLM_MODEL`.
+    ///
+    /// # Errors
+    ///
+    /// Currently never fails — returns `Ok` for forward compatibility with
+    /// fallible config sources.
     pub fn from_env() -> Result<Self, crate::MnemosError> {
         Ok(Self {
             storage: StorageConfig::from_env(),
@@ -36,7 +41,7 @@ impl MnemosConfig {
 /// in-process via `Client::open`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// HelixDB HTTP endpoint (used by `Http` backend).
+    /// `HelixDB` HTTP endpoint (used by `Http` backend).
     pub url: String,
     /// Local data root for the `EmbeddedDisk` backend (default).
     pub data_root: String,
@@ -51,10 +56,10 @@ pub struct StorageConfig {
     /// S3 region for `ObjectStorage`.
     #[serde(default = "default_object_region")]
     pub object_region: String,
-    /// Custom endpoint for S3-compatible stores (e.g. MinIO in Docker).
+    /// Custom endpoint for S3-compatible stores (e.g. `MinIO` in `Docker`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_endpoint: Option<String>,
-    /// Allow plain-HTTP endpoint (local MinIO / tests only).
+    /// Allow plain-HTTP endpoint (local `MinIO` / tests only).
     #[serde(default)]
     pub object_allow_http: bool,
 }

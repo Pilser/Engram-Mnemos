@@ -2,7 +2,7 @@
 //! mnemos-stimulation: spreading-activation engine.
 //!
 //! Pure-math core (seed activation, edge transfer, decay, surfacing,
-//! recency) plus a thin HelixDB neighbor fetch. See
+//! recency) plus a thin `HelixDB` neighbor fetch. See
 //! `__reference/AGI-Memory-Research/Explanation-docs/07-Stimulation-Layer.md`.
 
 use std::collections::HashMap;

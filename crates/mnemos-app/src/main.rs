@@ -436,7 +436,7 @@ async fn dispatch(command: Command) -> i32 {
         Command::McpTools => match mnemos_mcp_tools::run(cli).await {
             Ok(()) => 0,
             Err(error) => {
-                eprintln!("mnemos: error: mcp-tools failed: {}", error.to_string());
+                eprintln!("mnemos: error: mcp-tools failed: {error}");
                 1
             }
         },

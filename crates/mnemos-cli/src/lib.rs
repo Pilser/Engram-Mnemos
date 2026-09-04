@@ -47,7 +47,7 @@ fn get_memory_stats() {
         .returning(["engrams", "concepts", "identities", "contradicted"])
 }
 
-/// Fetch concepts with high source_count for mitosis splitting.
+/// Fetch concepts with high `source_count` for mitosis splitting.
 #[query]
 fn get_mitosis_candidates_cli(min_source_count: i64) {
     let _ = &min_source_count;
@@ -61,7 +61,7 @@ fn get_mitosis_candidates_cli(min_source_count: i64) {
         .returning(["concepts"])
 }
 
-/// Fetch concepts that could crystallize into identities (high source_count, not yet linked).
+/// Fetch concepts that could crystallize into identities (high `source_count`, not yet linked).
 #[query]
 fn get_concepts_for_identity(min_source_count: i64) {
     let _ = &min_source_count;

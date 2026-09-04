@@ -1,10 +1,10 @@
-//! Canonical domain types. Field names mirror HelixDB property names
+//! Canonical domain types. Field names mirror `HelixDB` property names
 //! from `__reference/AGI-Memory-Research/helixdb-embedded-schema.md`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Unique id for an engram node (HelixDB `$id`).
+/// Unique id for an engram node (`HelixDB` `$id`).
 pub type EngramId = u64;
 /// Unique id for a concept node.
 pub type ConceptId = u64;
@@ -55,7 +55,7 @@ pub struct Engram {
     pub embedding: Option<Vec<f32>>,
 }
 
-/// Knowledge concept linked from engrams via Recalls / AbstractsTo.
+/// Knowledge concept linked from engrams via Recalls / `AbstractsTo`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Concept {
     pub id: Option<ConceptId>,
@@ -145,7 +145,7 @@ pub struct ConsolidationReport {
     pub contradictions_linked: u64,
 }
 
-/// Embedding dimension used everywhere (OpenAI text-embedding-3-small).
+/// Embedding dimension used everywhere (`OpenAI` text-embedding-3-small).
 pub const EMBEDDING_DIM: usize = 1536;
 
 /// Compute cosine similarity in f64 precision.
@@ -196,8 +196,7 @@ pub fn compute_centroid(embeddings: &[Vec<f32>]) -> Vec<f32> {
 #[must_use]
 pub fn parse_timestamp_rfc3339(ts: &str) -> f64 {
     DateTime::parse_from_rfc3339(ts)
-        .map(|dt| dt.timestamp() as f64)
-        .unwrap_or(0.0)
+        .map_or(0.0, |dt| dt.timestamp() as f64)
 }
 
 #[cfg(test)]
