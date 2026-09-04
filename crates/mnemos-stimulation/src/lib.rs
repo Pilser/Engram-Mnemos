@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! mnemos-stimulation: spreading-activation engine.
 //!
 //! Pure-math core (seed activation, edge transfer, decay, surfacing,
