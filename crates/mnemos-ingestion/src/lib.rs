@@ -146,18 +146,34 @@ impl IngestionPipeline {
 
     /// The ingest workhorse shared by [`Self::ingest`] and
     /// [`Self::ingest_with_importance`] (telemetry wraps at that layer).
+    ///
+    /// The four ML calls (tag, score, embed, extract) depend ONLY on `text` —
+    /// none consumes another's output (the scorer takes raw `text`, not the
+    /// tag) — so they run concurrently via [`tokio::join`]. Same prompts, same
+    /// inputs, same parsing: identical values, ~1 slow call instead of ~4
+    /// sequential ones. Error precedence stays tag → score → embed → extract.
     async fn ingest_inner(
         &self,
         text: &str,
         engram_type: EngramType,
         importance: Option<f64>,
     ) -> mnemos_core::Result<EngramId> {
-        let emotional_charge = self.tagger.tag(text).await?;
-        let importance_score = match importance {
-            Some(override_score) => clamp_importance(override_score),
-            None => self.scorer.score(text).await?,
+        let score_fut = async {
+            match importance {
+                Some(override_score) => Ok(clamp_importance(override_score)),
+                None => self.scorer.score(text).await,
+            }
         };
-        let embedding = self.embedder.embed(text).await?;
+        let (emotional_charge, importance_score, embedding, concepts) = tokio::join!(
+            self.tagger.tag(text),
+            score_fut,
+            self.embedder.embed(text),
+            self.extractor.extract(text),
+        );
+        let emotional_charge = emotional_charge?;
+        let importance_score = importance_score?;
+        let embedding = embedding?;
+        let concepts = concepts?;
         let timestamp = Utc::now().to_rfc3339();
 
         let request = create_full_engram(
@@ -177,7 +193,6 @@ impl IngestionPipeline {
             self.storage.client().query(request).send().await.map_err(storage_error)?;
         let engram_id = parse_node_id(&response)?;
 
-        let concepts = self.extractor.extract(text).await?;
         for concept in &concepts {
             let (concept_id, known_source_count) =
                 self.get_or_create_concept(concept).await?;
