@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! mnemos-mcp-http: HTTP host serving ALL rmcp streamable-HTTP services on
 //! ONE port.
 //!
@@ -62,6 +63,14 @@ pub const TOOLS_PATH: &str = "/mcp/tools";
 ///
 /// [`MnemosServer`]: mnemos_mcp_server::MnemosServer
 pub const CLI_PATH: &str = "/mcp/cli";
+
+/// Path for direct CLI RPC (`POST {"command": ...}`) against the running
+/// daemon. Lets shell/`curl`/agents hit the persistent `Cli` without
+/// spawning a new process per command.
+pub const CLI_RPC_PATH: &str = "/cli";
+
+/// Liveness probe for thin clients (`GET` → `{"status":"ok"}`).
+pub const HEALTH_PATH: &str = "/health";
 
 /// Which rmcp service a request path routes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +217,147 @@ fn handle_telemetry(path: &str, method: &hyper::Method) -> Option<hyper::Respons
     }
 }
 
+/// Handle `GET /health` and `POST /cli` against the persistent daemon
+/// `Cli`. Returns `Some(response)` if the path is a local route.
+async fn handle_local(
+    cli: &Arc<Cli>,
+    path: &str,
+    method: &hyper::Method,
+    req: hyper::Request<hyper::body::Incoming>,
+) -> Option<hyper::Response<HttpBody>> {
+    let clean = path.split(['?', '#']).next().unwrap_or(path);
+    if clean == HEALTH_PATH {
+        return Some(if *method == hyper::Method::GET {
+            json_response(serde_json::json!({"status": "ok", "service": "engram-daemon"}))
+        } else {
+            hyper::Response::builder()
+                .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+                .body(Full::new(Bytes::from_static(b"method not allowed")).boxed())
+                .expect("405 builds")
+        });
+    }
+    if clean != CLI_RPC_PATH {
+        return None;
+    }
+    if *method != hyper::Method::POST {
+        return Some(
+            hyper::Response::builder()
+                .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+                .body(Full::new(Bytes::from_static(b"method not allowed")).boxed())
+                .expect("405 builds"),
+        );
+    }
+    let body = match http_body_util::BodyExt::collect(req.into_body()).await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => {
+            return Some(json_response(serde_json::json!({"ok": false, "error": format!("read body: {e}")})));
+        }
+    };
+    Some(dispatch_cli_rpc(cli, &body).await)
+}
+
+/// Execute one CLI command against the running daemon's `Cli`.
+///
+/// Request: `{"command": "ingest"|"recall"|"reward"|"consolidate"|"stats",
+/// "text"?, "query"?, "limit"?, "attributions"?, "score"?, "recall_id"?, "aggressive"?}`.
+/// Always HTTP 200 with `{"ok": true, "data": ...}` or `{"ok": false, "error": ...}`;
+/// failures are recorded via telemetry (`mnemos-mcp-http` / `cli_rpc`).
+async fn dispatch_cli_rpc(cli: &Arc<Cli>, body: &[u8]) -> hyper::Response<HttpBody> {
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            mnemos_telemetry::global().record("mnemos-mcp-http", "cli_rpc", false, &format!("bad json: {e}"));
+            return json_response(serde_json::json!({"ok": false, "error": format!("bad json: {e}")}));
+        }
+    };
+    let command = req.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    let out: Result<serde_json::Value, String> = match command {
+        "ingest" => match req.get("text").and_then(|v| v.as_str()) {
+            Some(text) => cli.ingest(text).await.map(|id| serde_json::json!({"engram_id": id})).map_err(|e| e.to_string()),
+            None => Err("ingest needs {text}".to_string()),
+        },
+        "recall" => {
+            let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let limit = req.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(5) as usize;
+            match cli.recall(query, limit).await {
+                Ok(results) => {
+                    let recall_id = cli.last_recall_id().await;
+                    serde_json::to_value(&serde_json::json!({"results": results, "recall_id": recall_id})).map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "reward" => {
+            let score = req.get("score").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+            let res = match req.get("recall_id").and_then(serde_json::Value::as_u64) {
+                Some(id) => cli.reward_with_id(id, score).await,
+                None => {
+                    let attr: Vec<f64> = req.get("attributions").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+                    cli.reward(&attr, score).await
+                }
+            };
+            res.map(|()| serde_json::json!({"ok": true})).map_err(|e| e.to_string())
+        }
+        "consolidate" => {
+            let aggressive = req.get("aggressive").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            cli.consolidate_aggressive(aggressive).await.map(|r| serde_json::to_value(&r).unwrap_or_default()).map_err(|e| e.to_string())
+        }
+        "stats" => cli.stats().await.map(|s| serde_json::to_value(&s).unwrap_or_default()).map_err(|e| e.to_string()),
+        other => Err(format!("unknown command {other:?} (ingest|recall|reward|consolidate|stats)")),
+    };
+    match out {
+        Ok(data) => json_response(serde_json::json!({"ok": true, "data": data})),
+        Err(error) => {
+            mnemos_telemetry::global().record("mnemos-mcp-http", "cli_rpc", false, &error);
+            json_response(serde_json::json!({"ok": false, "error": error}))
+        }
+    }
+}
+
+/// One request against the persistent daemon: auth → local routes
+/// (`/health`, `/cli`, `/telemetry*`) → rmcp services → 404.
+async fn handle_request(
+    protocol_service: StreamableHttpService<Arc<ProtocolTools>, LocalSessionManager>,
+    tools_service: StreamableHttpService<mnemos_mcp_tools::MnemosMcpTools, LocalSessionManager>,
+    cli_service: StreamableHttpService<mnemos_mcp_server::MnemosServer, LocalSessionManager>,
+    rpc_cli: Arc<Cli>,
+    token: Option<String>,
+    req: hyper::Request<hyper::body::Incoming>,
+) -> Result<hyper::Response<HttpBody>, Infallible> {
+    if !is_authorized(&req, token.as_deref()) {
+        return Ok(unauthorized());
+    }
+    // Local daemon routes (/health, /cli) take precedence over rmcp
+    // services; they hit the persistent Cli.
+    let path = req.uri().path().to_string();
+    let clean = path.split(['?', '#']).next().unwrap_or(&path);
+    if clean == HEALTH_PATH || clean == CLI_RPC_PATH {
+        let method = req.method().clone();
+        if let Some(resp) = handle_local(&rpc_cli, &path, &method, req).await {
+            return Ok(resp);
+        }
+        return Ok(not_found());
+    }
+    if let Some(resp) = handle_telemetry(req.uri().path(), req.method()) {
+        return Ok(resp);
+    }
+    match route_for_path(req.uri().path()) {
+        Some(ServiceKey::Protocol) => match protocol_service.oneshot(req).await {
+            Ok(response) => Ok(response),
+            Err(never) => match never {},
+        },
+        Some(ServiceKey::Tools) => match tools_service.oneshot(req).await {
+            Ok(response) => Ok(response),
+            Err(never) => match never {},
+        },
+        Some(ServiceKey::Cli) => match cli_service.oneshot(req).await {
+            Ok(response) => Ok(response),
+            Err(never) => match never {},
+        },
+        None => Ok(not_found()),
+    }
+}
+
 /// Record a serve-side failure via telemetry (stderr logging stays inline).
 fn record_serve_error(detail: &str) {
     mnemos_telemetry::global().record("mnemos-mcp-http", "serve", false, detail);
@@ -267,7 +417,9 @@ impl<T: tokio::io::AsyncWrite + Unpin> hyper::rt::Write for TokioIo<T> {
     }
 }
 
-/// Serve BOTH rmcp streamable-HTTP services on one port.
+/// Serve ALL surfaces on one port: rmcp MCP (`/mcp`, `/mcp/tools`,
+/// `/mcp/cli`), telemetry (`/telemetry*`), daemon CLI RPC (`POST /cli`)
+/// and liveness (`GET /health`).
 ///
 /// `HOST`/`PORT` come from `MNEMOS_MCP_HOST` / `MNEMOS_MCP_PORT`. The
 /// `protocol` tools answer on `/mcp`; the single-tool CLI (built fresh per
@@ -304,6 +456,7 @@ pub async fn serve(protocol: ProtocolTools, cli: Arc<Cli>) -> mnemos_core::Resul
     eprintln!("mnemos-mcp-http listening on http://{addr}{PROTOCOL_PATH} (protocol tools)");
     eprintln!("mnemos-mcp-http listening on http://{addr}{TOOLS_PATH} (multi-tool)");
     eprintln!("mnemos-mcp-http listening on http://{addr}{CLI_PATH} (cli single-tool)");
+    eprintln!("mnemos-mcp-http listening on http://{addr}{CLI_RPC_PATH} (daemon CLI RPC) + {HEALTH_PATH}");
     let token = mcp_token_from_env();
     if token.is_some() {
         eprintln!("mnemos-mcp-http auth: bearer token required for /mcp/* (MNEMOS_MCP_TOKEN set)");
@@ -344,6 +497,7 @@ pub async fn serve(protocol: ProtocolTools, cli: Arc<Cli>) -> mnemos_core::Resul
         let protocol_service = protocol_service.clone();
         let tools_service = tools_service.clone();
         let cli_service = cli_service.clone();
+        let rpc_cli = Arc::clone(&cli);
         let token = token.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
@@ -352,34 +506,16 @@ pub async fn serve(protocol: ProtocolTools, cli: Arc<Cli>) -> mnemos_core::Resul
                     let protocol_service = protocol_service.clone();
                     let tools_service = tools_service.clone();
                     let cli_service = cli_service.clone();
+                    let rpc_cli = Arc::clone(&rpc_cli);
                     let token = token.clone();
-                    async move {
-                        if !is_authorized(&req, token.as_deref()) {
-                            return Ok::<_, Infallible>(unauthorized());
-                        }
-                        if let Some(resp) = handle_telemetry(req.uri().path(), req.method()) {
-                            return Ok(resp);
-                        }
-                        match route_for_path(req.uri().path()) {
-                            Some(ServiceKey::Protocol) => {
-                                match protocol_service.oneshot(req).await {
-                                    Ok(response) => Ok::<_, Infallible>(response),
-                                    Err(never) => match never {},
-                                }
-                            }
-                            Some(ServiceKey::Tools) => {
-                                match tools_service.oneshot(req).await {
-                                    Ok(response) => Ok::<_, Infallible>(response),
-                                    Err(never) => match never {},
-                                }
-                            }
-                            Some(ServiceKey::Cli) => match cli_service.oneshot(req).await {
-                                Ok(response) => Ok::<_, Infallible>(response),
-                                Err(never) => match never {},
-                            },
-                            None => Ok(not_found()),
-                        }
-                    }
+                    handle_request(
+                        protocol_service,
+                        tools_service,
+                        cli_service,
+                        rpc_cli,
+                        token,
+                        req,
+                    )
                 },
             );
             if let Err(err) = hyper::server::conn::http1::Builder::new()

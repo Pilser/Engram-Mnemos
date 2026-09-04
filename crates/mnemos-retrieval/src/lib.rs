@@ -400,28 +400,58 @@ impl RetrievalPipeline {
     /// search, or candidate decoding fails.
     pub async fn recall(&mut self, query: &str, limit: usize) -> Result<Vec<ResonanceResult>> {
         // Step 1: embed the query client-side (no server-side Embed()).
-        let query_embedding = self.embedder.embed(query).await?;
+        let query_embedding = match self.embedder.embed(query).await {
+            Ok(v) => v,
+            Err(e) => {
+                mnemos_telemetry::global().record(
+                    "mnemos-retrieval",
+                    "recall",
+                    false,
+                    &format!("embed: {e}"),
+                );
+                return Err(e);
+            }
+        };
 
         // Step 2: vector search returns Engram nodes directly.
         let fetch = i64::try_from(limit).unwrap_or(i64::MAX).max(0);
-        let request = search_engrams_full(query_embedding, fetch)
-            .map_err(|e| MnemosError::Storage(format!("build search_engrams_full: {e}")))?;
-        let response: serde_json::Value = self
+        let request = match search_engrams_full(query_embedding, fetch) {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("build search_engrams_full: {e}");
+                mnemos_telemetry::global().record("mnemos-retrieval", "recall", false, &msg);
+                return Err(MnemosError::Storage(msg));
+            }
+        };
+        let response: serde_json::Value = match self
             .storage
             .client()
             .query(request)
             .send()
             .await
-            .map_err(|e| MnemosError::Storage(format!("search_engrams_full: {e}")))?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("search_engrams_full: {e}");
+                mnemos_telemetry::global().record("mnemos-retrieval", "recall", false, &msg);
+                return Err(MnemosError::Storage(msg));
+            }
+        };
 
         // Step 3: deserialize candidates.
-        let candidates: Vec<EngramCandidate> = serde_json::from_value(
+        let candidates: Vec<EngramCandidate> = match serde_json::from_value(
             response
                 .get("candidates")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null),
-        )
-        .map_err(|e| MnemosError::Storage(format!("decode candidates: {e}")))?;
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("decode candidates: {e}");
+                mnemos_telemetry::global().record("mnemos-retrieval", "recall", false, &msg);
+                return Err(MnemosError::Storage(msg));
+            }
+        };
 
         // Step 4: semantic similarities (1.0 - cosine distance).
         let semantic_sims: Vec<f64> =
@@ -496,6 +526,12 @@ impl RetrievalPipeline {
             );
         }
 
+        mnemos_telemetry::global().record(
+            "mnemos-retrieval",
+            "recall",
+            true,
+            &format!("results={}", results.len()),
+        );
         Ok(results)
     }
 

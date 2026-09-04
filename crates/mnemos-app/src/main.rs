@@ -25,6 +25,7 @@ use mnemos_llm_anthropic::AnthropicProvider;
 use mnemos_llm_local::OllamaProvider;
 use mnemos_llm_openai::OpenAiCompatibleProvider;
 use mnemos_llm_trait::LlmProvider;
+use mnemos_mcp_protocol::ProtocolTools;
 use mnemos_mitosis::MitosisSplitter;
 use mnemos_retrieval::RetrievalPipeline;
 use mnemos_stimulation::StimulationEngine;
@@ -56,10 +57,11 @@ pub enum Command {
         query: String,
         limit: usize,
     },
-    /// `reward <score> [attributions csv]` — Adam-update edge weights.
+    /// `reward <score> [attributions csv | --recall-id N]` — Adam-update edge weights.
     Reward {
         score: f64,
         attributions: Vec<f64>,
+        recall_id: Option<u64>,
     },
     /// `consolidate` — run one consolidation ("sleep") cycle.
     Consolidate,
@@ -69,6 +71,9 @@ pub enum Command {
     McpServer,
     /// `mcp-tools` — serve the MCP tool subset over stdio.
     McpTools,
+    /// `serve` (`daemon`, `up`) — persistent daemon: HTTP (`/mcp*`, `/cli`,
+    /// `/health`, `/telemetry*`) + background consolidation. Stays in terminal.
+    Serve,
     /// Explicit `help` / `--help` / `-h`.
     Help,
     /// Anything unparseable; `message` is shown alongside the usage text.
@@ -108,6 +113,7 @@ pub fn parse_args(argv: &[String]) -> Command {
         "stats" => Command::Stats,
         "mcp-server" => Command::McpServer,
         "mcp-tools" => Command::McpTools,
+        "serve" | "daemon" | "up" => Command::Serve,
         "help" | "--help" | "-h" => Command::Help,
         other => Command::Invalid {
             message: format!("unknown command {other:?}"),
@@ -172,23 +178,42 @@ fn parse_reward(rest: &[&str]) -> Command {
         };
     };
     let mut attributions = Vec::new();
-    if let Some(csv) = rest.get(1) {
-        for part in csv.split(',') {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            let Ok(value) = part.parse::<f64>() else {
+    let mut recall_id = None;
+    if let Some(second) = rest.get(1) {
+        if let Some(id_str) = second.strip_prefix("--recall-id=") {
+            let Ok(id) = id_str.trim().parse::<u64>() else {
                 return Command::Invalid {
-                    message: format!("reward attribution is not a number: {part:?}"),
+                    message: format!("reward recall id is not a number: {second:?}"),
                 };
             };
-            attributions.push(value);
+            recall_id = Some(id);
+        } else if *second == "--recall-id" {
+            let id_str = rest.get(2).copied().unwrap_or("");
+            let Ok(id) = id_str.trim().parse::<u64>() else {
+                return Command::Invalid {
+                    message: "reward needs a number after --recall-id".to_string(),
+                };
+            };
+            recall_id = Some(id);
+        } else {
+            for part in second.split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let Ok(value) = part.parse::<f64>() else {
+                    return Command::Invalid {
+                        message: format!("reward attribution is not a number: {part:?}"),
+                    };
+                };
+                attributions.push(value);
+            }
         }
     }
     Command::Reward {
         score,
         attributions,
+        recall_id,
     }
 }
 
@@ -199,11 +224,16 @@ fn usage() -> &'static str {
      commands:\n\
      \x20 ingest <text...>                    store one episodic memory\n\
      \x20 recall <query...> [--limit N]       recall top-N memories as JSON (default 5)\n\
-     \x20 reward <score> [attributions csv]   apply scalar reward to edge weights\n\
+     \x20 reward <score> [--recall-id N | attributions csv]  reward a recall (ledger id) or raw attributions\n\
      \x20 consolidate                         run one consolidation cycle\n\
      \x20 stats                               print memory stats as JSON\n\
      \x20 mcp-server                           serve the full MCP server over stdio\n\
      \x20 mcp-tools                            serve the MCP tool subset over stdio\n\
+     \x20 serve (daemon, up)                   persistent daemon: HTTP /mcp*, /cli, /health, /telemetry* + background tasks (stays in terminal)\n\
+     \n\
+     daemon mode:\n\
+     \x20 CLI commands only hit the running daemon (POST /cli). If it is\n\
+     \x20 not running, they print an error — start it with `engram serve`.\n\
      \n\
      env:\n\
      \x20 LLM_PROVIDER=openai|xai|anthropic|ollama (default openai)\n\
@@ -275,6 +305,168 @@ fn build_embedding_provider(config: &LlmConfig) -> Result<Box<dyn EmbeddingProvi
     }
 }
 
+/// Base URL of the running daemon (`MNEMOS_MCP_HOST`/`MNEMOS_MCP_PORT`,
+/// default `127.0.0.1:4545`).
+fn daemon_base_url() -> String {
+    let host = std::env::var("MNEMOS_MCP_HOST")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = std::env::var("MNEMOS_MCP_PORT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .unwrap_or(4545);
+    format!("http://{host}:{port}")
+}
+
+/// Optional bearer token for daemon requests (`MNEMOS_MCP_TOKEN`, like the server).
+fn daemon_token() -> Option<String> {
+    std::env::var("MNEMOS_MCP_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Try the running daemon for one CLI command.
+///
+/// Returns `Some(exit_code)` when the daemon answered (success or
+/// application error), `None` when unreachable so the caller reports
+/// "daemon not running". A 600ms health probe avoids hanging when nothing
+/// listens. Auth mirrors the server (`Authorization: Bearer` when set).
+async fn try_daemon(command: &Command) -> Option<i32> {
+    let body = match command {
+        Command::Ingest { text } => serde_json::json!({"command": "ingest", "text": text}),
+        Command::Recall { query, limit } => {
+            serde_json::json!({"command": "recall", "query": query, "limit": limit})
+        }
+        Command::Reward { score, attributions, recall_id } => {
+            serde_json::json!({"command": "reward", "score": score, "attributions": attributions, "recall_id": recall_id})
+        }
+        Command::Consolidate => serde_json::json!({"command": "consolidate"}),
+        Command::Stats => serde_json::json!({"command": "stats"}),
+        _ => return None,
+    };
+    let client = reqwest::Client::new();
+    let base = daemon_base_url();
+    let health = tokio::time::timeout(
+        std::time::Duration::from_millis(600),
+        client.get(format!("{base}/health")).send(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !health.status().is_success() {
+        return None;
+    }
+    let mut post = client.post(format!("{base}/cli")).json(&body);
+    if let Some(token) = daemon_token() {
+        post = post.bearer_auth(token);
+    }
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(120), post.send())
+        .await
+        .ok()?
+        .ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
+    if json.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        match command {
+            Command::Ingest { .. } => {
+                println!("{}", json.get("data").and_then(|d| d.get("engram_id")).map_or(String::new(), ToString::to_string));
+                Some(0)
+            }
+            Command::Reward { .. } => {
+                println!("reward applied (daemon)");
+                Some(0)
+            }
+            _ => {
+                println!("{}", json.get("data").unwrap_or(&serde_json::Value::Null));
+                Some(0)
+            }
+        }
+    } else {
+        eprintln!(
+            "engram: daemon error: {}",
+            json.get("error").and_then(|v| v.as_str()).unwrap_or("unknown")
+        );
+        Some(1)
+    }
+}
+
+/// Persistent daemon: builds pipelines once, serves HTTP (`/mcp*`, `/cli`,
+/// `/health`, `/telemetry*`) forever, and runs background consolidation when
+/// `MNEMOS_CONSOLIDATE_INTERVAL_SECS > 0`.
+async fn serve_forever(config: &MnemosConfig) -> i32 {
+    let cli = match build_cli(config).await {
+        Ok(cli) => cli,
+        Err(message) => {
+            eprintln!("engram: error: {message}");
+            return 1;
+        }
+    };
+    // Background consolidation ticker ("background processing" while alive).
+    let interval_secs: u64 = std::env::var("MNEMOS_CONSOLIDATE_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    if interval_secs > 0 {
+        let bg = Arc::clone(&cli);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            loop {
+                tick.tick().await;
+                match bg.consolidate().await {
+                    Ok(report) => eprintln!(
+                        "engram: background consolidate pruned={} compressed={} promoted={}",
+                        report.pruned, report.compressed, report.promoted
+                    ),
+                    Err(e) => {
+                        mnemos_telemetry::global().record(
+                            "mnemos-app",
+                            "background_consolidate",
+                            false,
+                            &e.to_string(),
+                        );
+                    }
+                }
+            }
+        });
+        eprintln!("engram: background consolidate every {interval_secs}s");
+    }
+    // Protocol tools need their own provider handles (cheap HTTP clients).
+    let protocol = match build_protocol_tools(&cli, config).await {
+        Ok(p) => p,
+        Err(message) => {
+            eprintln!("engram: error: {message}");
+            return 1;
+        }
+    };
+    match mnemos_mcp_http::serve(protocol, cli).await {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("engram: error: serve failed: {error}");
+            1
+        }
+    }
+}
+
+/// Assemble [`ProtocolTools`] for the daemon's `/mcp` surface.
+async fn build_protocol_tools(
+    cli: &Arc<Cli>,
+    config: &MnemosConfig,
+) -> Result<ProtocolTools, String> {
+    let storage = Storage::from_config(&config.storage)
+        .await
+        .map_err(|error| error.to_string())?;
+    let llm = &config.llm;
+    Ok(ProtocolTools::new(
+        Arc::clone(cli),
+        ContradictionDetector::new(build_chat_provider(llm)?),
+        build_embedding_provider(llm)?,
+        storage,
+        Box::new(LlmEmotionalTagger::new(build_chat_provider(llm)?)),
+    ))
+}
+
 /// Assemble all pipelines behind one [`Cli`] facade.
 ///
 /// One handle is built (embedded disk/memory openers perform real I/O here)
@@ -333,7 +525,7 @@ async fn run(argv: Vec<String>) -> i32 {
             eprintln!("engram: error: {message}\n{}", usage());
             2
         }
-        Command::McpServer | Command::McpTools | Command::Ingest {
+        Command::McpServer | Command::McpTools | Command::Serve | Command::Ingest {
             ..
         } | Command::Recall {
             ..
@@ -360,6 +552,39 @@ async fn dispatch(command: Command) -> i32 {
         config.storage.effective_backend(),
         config.storage.database
     );
+    // Persistent daemon: pipelines built once, HTTP forever + background tasks.
+    if matches!(command, Command::Serve) {
+        return serve_forever(&config).await;
+    }
+    // Thin client: CLI commands ONLY hit the running daemon (same pipelines,
+    // shared learning state, background processing alive). No embedded
+    // one-shot fallback — everything must be calculated by the daemon so
+    // background tasks occur and telemetry records everything.
+    let forwardable = matches!(
+        command,
+        Command::Ingest { .. }
+            | Command::Recall { .. }
+            | Command::Reward { .. }
+            | Command::Consolidate
+            | Command::Stats
+    );
+    if forwardable {
+        if let Some(code) = try_daemon(&command).await {
+            eprintln!("engram: via daemon {}", daemon_base_url());
+            return code;
+        }
+        eprintln!(
+            "engram: error: engram daemon is not running (tried {}). Start it with `engram serve` first.",
+            daemon_base_url()
+        );
+        mnemos_telemetry::global().record(
+            "mnemos-app",
+            "daemon_unreachable",
+            false,
+            &daemon_base_url(),
+        );
+        return 1;
+    }
     let cli = match build_cli(&config).await {
         Ok(cli) => cli,
         Err(message) => {
@@ -385,7 +610,8 @@ async fn dispatch(command: Command) -> i32 {
             limit,
         } => match cli.recall(&query, limit).await {
             Ok(results) => {
-                match serde_json::to_string(&results) {
+                let recall_id = cli.last_recall_id().await;
+                match serde_json::to_string(&serde_json::json!({"results": results, "recall_id": recall_id})) {
                     Ok(json) => {
                         println!("{json}");
                         0
@@ -404,7 +630,12 @@ async fn dispatch(command: Command) -> i32 {
         Command::Reward {
             score,
             attributions,
-        } => match cli.reward(&attributions, score).await {
+            recall_id,
+        } => match if let Some(id) = recall_id {
+            cli.reward_with_id(id, score).await
+        } else {
+            cli.reward(&attributions, score).await
+        } {
             Ok(()) => {
                 println!("reward applied");
                 0
@@ -465,6 +696,10 @@ async fn dispatch(command: Command) -> i32 {
         Command::Help | Command::Invalid {
             ..
         } => {
+            eprintln!("engram: error: unexpected command\n{}", usage());
+            2
+        }
+        Command::Serve => {
             eprintln!("engram: error: unexpected command\n{}", usage());
             2
         }
@@ -574,16 +809,42 @@ mod tests {
             parse_args(&argv(&["reward", "0.8"])),
             Command::Reward {
                 score: 0.8,
-                attributions: Vec::new()
+                attributions: Vec::new(),
+                recall_id: None,
             }
         );
         assert_eq!(
             parse_args(&argv(&["reward", "-1", "0.5, 0.25,0.125"])),
             Command::Reward {
                 score: -1.0,
-                attributions: vec![0.5, 0.25, 0.125]
+                attributions: vec![0.5, 0.25, 0.125],
+                recall_id: None,
             }
         );
+    }
+
+    #[test]
+    fn reward_parses_recall_id_forms() {
+        assert_eq!(
+            parse_args(&argv(&["reward", "1.0", "--recall-id", "7"])),
+            Command::Reward {
+                score: 1.0,
+                attributions: Vec::new(),
+                recall_id: Some(7),
+            }
+        );
+        assert_eq!(
+            parse_args(&argv(&["reward", "1.0", "--recall-id=9"])),
+            Command::Reward {
+                score: 1.0,
+                attributions: Vec::new(),
+                recall_id: Some(9),
+            }
+        );
+        assert!(matches!(
+            parse_args(&argv(&["reward", "1.0", "--recall-id", "nope"])),
+            Command::Invalid { .. }
+        ));
     }
 
     #[test]
