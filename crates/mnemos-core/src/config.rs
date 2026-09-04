@@ -77,11 +77,24 @@ impl Default for StorageConfig {
 impl StorageConfig {
     #[must_use]
     pub fn from_env() -> Self {
+        let mut data_root = std::env::var("MNEMOS_DATA_ROOT")
+            .unwrap_or_else(|_| "./data/helix".to_string());
+        // When binary is at deploy/engram and data_root is "data/helix" (from deploy/.env),
+        // resolve it relative to the binary's directory so it stays in deploy/ regardless of CWD.
+        // This makes `cd deploy && ./engram` and `./deploy/engram` from repo root both use deploy/data/helix.
+        if data_root == "data/helix" || data_root == "./data/helix" {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    if dir.ends_with("deploy") {
+                        data_root = dir.join("data/helix").to_string_lossy().to_string();
+                    }
+                }
+            }
+        }
         Self {
             url: std::env::var("HELIX_URL")
                 .unwrap_or_else(|_| "http://localhost:6969".to_string()),
-            data_root: std::env::var("MNEMOS_DATA_ROOT")
-                .unwrap_or_else(|_| "./data/helix".to_string()),
+            data_root,
             database: std::env::var("MNEMOS_DATABASE")
                 .unwrap_or_else(|_| "mnemos".to_string()),
             backend: StorageBackend::from_env(),
