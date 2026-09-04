@@ -110,6 +110,32 @@ fn connect_defines_edge(concept_id: i64, identity_id: i64) {
         .returning(["edge"])
 }
 
+/// Build the vector-index request for `Engram.embedding` in plain Rust.
+///
+/// The `#[query]` macro is deliberately NOT used here: its codegen only
+/// accepts `bool/i64/f64/String/Vec` params and has no `NonZeroUsize`
+/// conversion, while the index dimension is a runtime value from env
+/// (`LlmConfig::embedding_dim`). `QueryRequest::write` + `set_query_name`
+/// produce the identical request shape. Idempotent server-side
+/// (`create_index_if_not_exists`).
+fn create_engram_vector_index_request(
+    dim: std::num::NonZeroUsize,
+) -> helix_db::QueryRequest {
+    let batch = write_batch().var_as(
+        "index",
+        g().create_vector_index_nodes(
+            "Engram",
+            "embedding",
+            dim,
+            VectorDistanceMetric::Cosine,
+            None::<&str>,
+        ),
+    ).returning(["index"]);
+    let mut request = helix_db::QueryRequest::write(batch);
+    request.set_query_name("create_engram_vector_index");
+    request
+}
+
 /// Unified CLI facade over all memory pipelines.
 pub struct Cli {
     ingestion: IngestionPipeline,
@@ -487,6 +513,40 @@ impl Cli {
             .await
             .map_err(|e| MnemosError::Storage(e.to_string()))?;
         Ok(())
+    }
+
+    /// Create the vector index on `Engram.embedding` (one-time setup).
+    ///
+    /// Idempotent (`create_index_if_not_exists`). `dimension` must match the
+    /// stored vectors exactly — it comes from env (`LlmConfig::embedding_dim`),
+    /// never from a CLI flag. Any positive dimension works.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MnemosError::Storage`] when `dimension` is 0, or the
+    /// `HelixDB` request fails.
+    pub async fn setup_vector_index(&self, dimension: usize) -> Result<String> {
+        let start = std::time::Instant::now();
+        let dim = std::num::NonZeroUsize::new(dimension).ok_or_else(|| {
+            MnemosError::Storage(format!("dimension must be > 0: {dimension}"))
+        })?;
+        let request = create_engram_vector_index_request(dim);
+        let response: serde_json::Value = self
+            .storage
+            .client()
+            .query(request)
+            .send()
+            .await
+            .map_err(|e| MnemosError::Storage(e.to_string()))?;
+        let ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        mnemos_telemetry::global().record_with_latency(
+            "mnemos-cli",
+            "setup_vector_index",
+            true,
+            &format!("dimension={dimension}"),
+            ms,
+        );
+        Ok(format!("vector index on Engram.embedding (dim {dimension}): {response}"))
     }
 
     /// Aggregate node counts via the single [`get_memory_stats`] query

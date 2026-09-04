@@ -65,6 +65,8 @@ pub enum Command {
     },
     /// `consolidate` — run one consolidation ("sleep") cycle.
     Consolidate,
+    /// `setup` — create the vector index (dimension from env, see `EMBEDDING_DIM`).
+    Setup,
     /// `stats` — print aggregate memory statistics as JSON.
     Stats,
     /// `mcp-server` — serve the full MCP server over stdio.
@@ -110,6 +112,7 @@ pub fn parse_args(argv: &[String]) -> Command {
         "recall" => parse_recall(&rest),
         "reward" => parse_reward(&rest),
         "consolidate" => Command::Consolidate,
+        "setup" => parse_setup(&rest),
         "stats" => Command::Stats,
         "mcp-server" => Command::McpServer,
         "mcp-tools" => Command::McpTools,
@@ -217,6 +220,16 @@ fn parse_reward(rest: &[&str]) -> Command {
     }
 }
 
+/// Parse `setup` (no args — dimension comes from env `EMBEDDING_DIM`).
+fn parse_setup(rest: &[&str]) -> Command {
+    if rest.is_empty() {
+        return Command::Setup;
+    }
+    Command::Invalid {
+        message: "setup takes no args (dimension comes from env EMBEDDING_DIM): engram setup".to_string(),
+    }
+}
+
 /// Usage text, printed for `Help` and [`Command::Invalid`].
 fn usage() -> &'static str {
     "usage: engram <command> [args]\n\
@@ -226,6 +239,7 @@ fn usage() -> &'static str {
      \x20 recall <query...> [--limit N]       recall top-N memories as JSON (default 5)\n\
      \x20 reward <score> [--recall-id N | attributions csv]  reward a recall (ledger id) or raw attributions\n\
      \x20 consolidate                         run one consolidation cycle\n\
+     \x20 setup                               create Engram vector index (dim from env EMBEDDING_DIM)\n\
      \x20 stats                               print memory stats as JSON\n\
      \x20 mcp-server                           serve the full MCP server over stdio\n\
      \x20 mcp-tools                            serve the MCP tool subset over stdio\n\
@@ -344,6 +358,9 @@ async fn try_daemon(command: &Command) -> Option<i32> {
             serde_json::json!({"command": "reward", "score": score, "attributions": attributions, "recall_id": recall_id})
         }
         Command::Consolidate => serde_json::json!({"command": "consolidate"}),
+        Command::Setup => {
+            serde_json::json!({"command": "setup"})
+        }
         Command::Stats => serde_json::json!({"command": "stats"}),
         _ => return None,
     };
@@ -538,7 +555,7 @@ async fn run(argv: Vec<String>) -> i32 {
             ..
         } | Command::Reward {
             ..
-        } | Command::Consolidate | Command::Stats => {
+        } | Command::Setup | Command::Consolidate | Command::Stats => {
             dispatch(command).await
         }
     }
@@ -574,6 +591,7 @@ async fn dispatch(command: Command) -> i32 {
             | Command::Reward { .. }
             | Command::Consolidate
             | Command::Stats
+            | Command::Setup
     );
     if forwardable {
         if let Some(code) = try_daemon(&command).await {
@@ -672,6 +690,16 @@ async fn dispatch(command: Command) -> i32 {
             },
             Err(error) => {
                 eprintln!("engram: error: consolidate failed: {error}");
+                1
+            }
+        },
+        Command::Setup => match cli.setup_vector_index(config.llm.embedding_dim).await {
+            Ok(message) => {
+                println!("{message}");
+                0
+            }
+            Err(error) => {
+                eprintln!("engram: error: setup failed: {error}");
                 1
             }
         },

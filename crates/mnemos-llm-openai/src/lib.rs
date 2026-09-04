@@ -264,6 +264,7 @@ mod tests {
             model: "llama".into(),
             embedding_model: "emb".into(),
             embedding_base_url: "http://localhost:11434/v1".into(),
+            embedding_dim: 1536,
         };
         let p = OpenAiCompatibleProvider::from_config(&cfg);
         assert_eq!(p.model(), "llama");

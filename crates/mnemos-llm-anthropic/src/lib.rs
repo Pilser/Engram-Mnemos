@@ -89,6 +89,7 @@ mod tests {
             model: "claude-sonnet-4-5".into(),
             embedding_model: "emb".into(),
             embedding_base_url: "https://api.openai.com/v1".into(),
+            embedding_dim: 1536,
         };
         let p = AnthropicProvider::from_config(&cfg);
         assert_eq!(p.model(), "claude-sonnet-4-5");

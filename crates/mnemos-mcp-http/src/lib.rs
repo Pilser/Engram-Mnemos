@@ -303,7 +303,12 @@ async fn dispatch_cli_rpc(cli: &Arc<Cli>, body: &[u8]) -> hyper::Response<HttpBo
             cli.consolidate_aggressive(aggressive).await.map(|r| serde_json::to_value(&r).unwrap_or_default()).map_err(|e| e.to_string())
         }
         "stats" => cli.stats().await.map(|s| serde_json::to_value(&s).unwrap_or_default()).map_err(|e| e.to_string()),
-        other => Err(format!("unknown command {other:?} (ingest|recall|reward|consolidate|stats)")),
+        "setup" => {
+            // Dimension comes from env (EMBEDDING_DIM), never from the request.
+            let dimension = mnemos_core::embedding_dim_from_env();
+            cli.setup_vector_index(dimension).await.map(|s| serde_json::json!({"dimension": dimension, "message": s})).map_err(|e| e.to_string())
+        }
+        other => Err(format!("unknown command {other:?} (ingest|recall|reward|consolidate|stats|setup)")),
     };
     match out {
         Ok(data) => json_response(serde_json::json!({"ok": true, "data": data})),

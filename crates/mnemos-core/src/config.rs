@@ -201,6 +201,15 @@ pub struct LlmConfig {
     /// Falls back to `base_url` when unset.
     #[serde(default)]
     pub embedding_base_url: String,
+    /// Embedding vector dimension for the vector index. From `EMBEDDING_DIM`;
+    /// defaults to 384 for local embeddings, 1536 otherwise (OpenAI).
+    #[serde(default = "default_embedding_dim")]
+    pub embedding_dim: usize,
+}
+
+/// Default embedding dimension (OpenAI).
+fn default_embedding_dim() -> usize {
+    1536
 }
 
 impl Default for LlmConfig {
@@ -226,7 +235,32 @@ impl LlmConfig {
             embedding_model: std::env::var("EMBEDDING_MODEL")
                 .unwrap_or_else(|_| "text-embedding-3-small".to_string()),
             embedding_base_url,
+            embedding_dim: embedding_dim_from_env(),
         }
+    }
+}
+
+/// Resolve the embedding vector dimension from env.
+///
+/// Explicit `EMBEDDING_DIM` always wins; otherwise 384 for local embeddings,
+/// 1536 for OpenAI-compatible endpoints. Shared by `LlmConfig::from_env` and
+/// the `setup` command path so both read the same source of truth.
+#[must_use]
+pub fn embedding_dim_from_env() -> usize {
+    if let Some(d) = std::env::var("EMBEDDING_DIM")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|d| *d > 0)
+    {
+        return d;
+    }
+    let local = std::env::var("EMBEDDING_PROVIDER")
+        .ok()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("local"));
+    if local {
+        384
+    } else {
+        1536
     }
 }
 
