@@ -1,8 +1,8 @@
-# Engram Nmose — Cognitive Memory Operating System
+# Engram Mnemos — Cognitive Memory Operating System
 
 > Embedded HelixDB + Rust memory for AI — episodic memory that learns.
 
-Engram Nmose (MNEMOS) is a modular Rust workspace that gives an AI persistent, learnable memory via embedded HelixDB 3.0.0: engrams with embeddings on-node, concepts via LLM extraction, CRR resonance scoring, stimulation waves, learnable edge weights (Adam), contradiction detection, mitosis splitting, and identity crystallization — all behind a unified CLI + MCP (stdio + HTTP).
+Engram Mnemos (MNEMOS) is a modular Rust workspace that gives an AI persistent, learnable memory via embedded HelixDB 3.0.0: engrams with embeddings on-node, concepts via LLM extraction, CRR resonance scoring, stimulation waves, learnable edge weights (Adam), contradiction detection, mitosis splitting, and identity crystallization — all behind a unified CLI + MCP (stdio + HTTP).
 
 **Binary:** `nmose` — `ingest` / `recall` / `reward` / `consolidate` / `stats` / `mcp-server` / `mcp-tools` / `mcp-http` (`:4545/mcp`, `:4545/mcp/tools`, `:4545/mcp/cli` + `GET /telemetry`).
 
