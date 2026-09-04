@@ -88,6 +88,7 @@ mod tests {
             base_url: "https://api.openai.com/v1".into(),
             model: "llama3.1".into(),
             embedding_model: "emb".into(),
+            embedding_base_url: "https://api.openai.com/v1".into(),
         };
         let p = OllamaProvider::from_config(&cfg);
         assert_eq!(p.model(), "llama3.1");

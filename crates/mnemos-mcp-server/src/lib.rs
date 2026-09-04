@@ -2,7 +2,7 @@
 //! mnemos-mcp-server: MCP server exposing the MNEMOS memory CLI as ONE tool.
 //!
 //! The server owns a `std::sync::Arc<mnemos_cli::Cli>` (built by `mnemos-app`)
-//! and exposes a single tool, `mnemos_cli`, over stdio:
+//! and exposes a single tool, `engram_cli`, over stdio:
 //!
 //! - `ingest` → `Cli::ingest(text)` → `{ "engram_id": … }`
 //! - `recall` → `Cli::recall(query, limit)` → `{ "results": […] }`
@@ -37,7 +37,7 @@ use serde::Deserialize;
 /// `limit` used for `recall` when the caller omits it.
 const DEFAULT_RECALL_LIMIT: usize = 5;
 
-/// Wire parameters for the single `mnemos_cli` tool.
+/// Wire parameters for the single `engram_cli` tool.
 ///
 /// `command` is one of `ingest`, `recall`, `reward`, `consolidate`, `stats`,
 /// `help`. The remaining fields are per-command; missing required fields are
@@ -143,7 +143,7 @@ fn reward_args(params: &MnemosCliParams) -> Result<(&[f64], f64), McpError> {
 /// the `mnemos-app` binary).
 fn global_help() -> String {
     [
-        "mnemos_cli commands (same as `mnemos <command>` on the shell via mnemos-app):",
+        "engram_cli commands (same as `mnemos <command>` on the shell via mnemos-app):",
         "- ingest: store one text episode",
         "- recall: search memory by resonance",
         "- reward: apply a scalar reward signal",
@@ -226,7 +226,7 @@ fn help_for_topic(topic: Option<&str>) -> Result<String, McpError> {
     }
 }
 
-/// MCP server exposing the MNEMOS CLI as the single `mnemos_cli` tool.
+/// MCP server exposing the MNEMOS CLI as the single `engram_cli` tool.
 pub struct MnemosServer {
     cli: Arc<Cli>,
     tool_router: ToolRouter<Self>,
@@ -263,10 +263,10 @@ impl MnemosServer {
     /// Commands: ingest, recall, reward, consolidate, stats.
     /// Shell parity: same commands exist as `mnemos <command>` on the shell.
     #[tool(
-        name = "mnemos_cli",
+        name = "engram_cli",
         description = "Single entry point for the MNEMOS memory CLI. Call {\"command\":\"help\"} for the command list, or {\"command\":\"help\",\"args\":[\"<command>\"]} for per-command usage (params, types, example JSON — like --help per command). Commands: ingest, recall, reward, consolidate, stats. Shell parity: same commands exist as `mnemos <command>` on the shell."
     )]
-    async fn mnemos_cli(
+    async fn engram_cli(
         &self,
         Parameters(params): Parameters<MnemosCliParams>,
     ) -> Result<String, McpError> {
@@ -345,8 +345,8 @@ mod tests {
 
     #[test]
     fn tool_attr_matches_spec() {
-        let attr = MnemosServer::mnemos_cli_tool_attr();
-        assert_eq!(attr.name.as_ref(), "mnemos_cli");
+        let attr = MnemosServer::engram_cli_tool_attr();
+        assert_eq!(attr.name.as_ref(), "engram_cli");
         let desc = attr.description.expect("description present");
         assert!(desc.contains("command\":\"help\""), "desc should mention help");
         assert!(desc.contains("ingest, recall, reward, consolidate, stats"), "desc should list commands");

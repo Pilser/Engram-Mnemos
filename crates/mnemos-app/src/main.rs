@@ -30,7 +30,16 @@ use mnemos_retrieval::RetrievalPipeline;
 use mnemos_stimulation::StimulationEngine;
 use mnemos_storage::Storage;
 
-/// Default result count for `mnemos recall` when `--limit` is omitted.
+/// Load env files if present: `.env`, `deploy/.env`, `local/.env` (all optional, gitignored deploy/local take precedence).
+fn load_env_files() {
+    let _ = dotenvy::dotenv(); // .env at repo root
+    // deploy/.env and local/.env override .env when present
+    let _ = dotenvy::from_filename_override("deploy/.env");
+    let _ = dotenvy::from_filename_override("local/.env");
+    let _ = dotenvy::from_filename_override(".env.local");
+}
+
+/// Default result count for `engram recall` when `--limit` is omitted.
 pub const DEFAULT_RECALL_LIMIT: usize = 5;
 
 /// Parsed subcommand. [`parse_args`] is the only pure, unit-testable piece
@@ -84,7 +93,7 @@ pub fn parse_args(argv: &[String]) -> Command {
             let text = rest.join(" ");
             if text.trim().is_empty() {
                 Command::Invalid {
-                    message: "ingest needs text: mnemos ingest <text...>".to_string(),
+                    message: "ingest needs text: engram ingest <text...>".to_string(),
                 }
             } else {
                 Command::Ingest {
@@ -117,7 +126,7 @@ fn parse_recall(rest: &[&str]) -> Command {
             let value = rest.get(index).and_then(|s| s.parse::<usize>().ok());
             let Some(value) = value else {
                 return Command::Invalid {
-                    message: "--limit needs a number: mnemos recall <query...> [--limit N]"
+                    message: "--limit needs a number: engram recall <query...> [--limit N]"
                         .to_string(),
                 };
             };
@@ -125,7 +134,7 @@ fn parse_recall(rest: &[&str]) -> Command {
         } else if let Some(value) = word.strip_prefix("--limit=") {
             let Ok(value) = value.parse::<usize>() else {
                 return Command::Invalid {
-                    message: "--limit needs a number: mnemos recall <query...> [--limit N]"
+                    message: "--limit needs a number: engram recall <query...> [--limit N]"
                         .to_string(),
                 };
             };
@@ -138,7 +147,7 @@ fn parse_recall(rest: &[&str]) -> Command {
     let query = query_parts.join(" ");
     if query.trim().is_empty() {
         Command::Invalid {
-            message: "recall needs a query: mnemos recall <query...> [--limit N]".to_string(),
+            message: "recall needs a query: engram recall <query...> [--limit N]".to_string(),
         }
     } else {
         Command::Recall {
@@ -152,7 +161,7 @@ fn parse_recall(rest: &[&str]) -> Command {
 fn parse_reward(rest: &[&str]) -> Command {
     let Some(score_word) = rest.first() else {
         return Command::Invalid {
-            message: "reward needs a score: mnemos reward <score> [attributions csv]"
+            message: "reward needs a score: engram reward <score> [attributions csv]"
                 .to_string(),
         };
     };
@@ -184,7 +193,7 @@ fn parse_reward(rest: &[&str]) -> Command {
 
 /// Usage text, printed for `Help` and [`Command::Invalid`].
 fn usage() -> &'static str {
-    "usage: mnemos <command> [args]\n\
+    "usage: engram <command> [args]\n\
      \n\
      commands:\n\
      \x20 ingest <text...>                    store one episodic memory\n\
@@ -196,7 +205,7 @@ fn usage() -> &'static str {
      \x20 mcp-tools                            serve the MCP tool subset over stdio\n\
      \n\
      env:\n\
-     \x20 LLM_PROVIDER=openai|anthropic|ollama (default openai)\n\
+     \x20 LLM_PROVIDER=openai|xai|anthropic|ollama (default openai)\n\
      \x20 EMBEDDING_PROVIDER=openai|local      (default openai)"
 }
 
@@ -208,7 +217,19 @@ fn usage() -> &'static str {
 fn build_chat_provider(config: &LlmConfig) -> Result<Box<dyn LlmProvider>, String> {
     let name = std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
     match name.trim().to_lowercase().as_str() {
-        "" | "openai" => Ok(Box::new(OpenAiCompatibleProvider::from_config(config))),
+        "" | "openai" | "xai" | "grok" => {
+            // xAI Grok is OpenAI-compatible at https://api.x.ai/v1 — use the same path.
+            // Allow `XAI_API_KEY` to override `OPENAI_API_KEY` when set.
+            let mut cfg = config.clone();
+            if name.trim().to_lowercase().as_str() == "xai" || name.trim().to_lowercase().as_str() == "grok" {
+                if let Ok(key) = std::env::var("XAI_API_KEY") {
+                    if !key.trim().is_empty() {
+                        cfg.api_key = key;
+                    }
+                }
+            }
+            Ok(Box::new(OpenAiCompatibleProvider::from_config(&cfg)))
+        }
         "anthropic" => {
             // `LlmConfig::from_env` only reads `OPENAI_API_KEY`; prefer a
             // dedicated Anthropic key when one is set.
@@ -222,7 +243,7 @@ fn build_chat_provider(config: &LlmConfig) -> Result<Box<dyn LlmProvider>, Strin
         }
         "ollama" => Ok(Box::new(OllamaProvider::from_config(config))),
         other => Err(format!(
-            "unknown LLM_PROVIDER={other:?} (expected openai|anthropic|ollama)"
+            "unknown LLM_PROVIDER={other:?} (expected openai|xai|anthropic|ollama)"
         )),
     }
 }
@@ -239,7 +260,7 @@ fn build_embedding_provider(config: &LlmConfig) -> Result<Box<dyn EmbeddingProvi
         "" | "openai" => Ok(Box::new(OpenAiEmbeddingProvider::from_config(config))),
         "local" => {
             eprintln!(
-                "mnemos: warning: local embeddings are 384-dim but the store \
+                "engram: warning: local embeddings are 384-dim but the store \
                  expects 1536-dim OpenAI vectors — do NOT mix stores built with \
                  different embedding providers"
             );
@@ -308,7 +329,7 @@ async fn run(argv: Vec<String>) -> i32 {
         Command::Invalid {
             message,
         } => {
-            eprintln!("mnemos: error: {message}\n{}", usage());
+            eprintln!("engram: error: {message}\n{}", usage());
             2
         }
         Command::McpServer | Command::McpTools | Command::Ingest {
@@ -328,12 +349,12 @@ async fn dispatch(command: Command) -> i32 {
     let config = match MnemosConfig::from_env() {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("mnemos: error: failed to load config: {error}");
+            eprintln!("engram: error: failed to load config: {error}");
             return 1;
         }
     };
     eprintln!(
-        "mnemos: storage backend=requested:{:?} effective:{:?} database={:?}",
+        "engram: storage backend=requested:{:?} effective:{:?} database={:?}",
         config.storage.backend,
         config.storage.effective_backend(),
         config.storage.database
@@ -341,7 +362,7 @@ async fn dispatch(command: Command) -> i32 {
     let cli = match build_cli(&config).await {
         Ok(cli) => cli,
         Err(message) => {
-            eprintln!("mnemos: error: {message}");
+            eprintln!("engram: error: {message}");
             return 1;
         }
     };
@@ -354,7 +375,7 @@ async fn dispatch(command: Command) -> i32 {
                 0
             }
             Err(error) => {
-                eprintln!("mnemos: error: ingest failed: {error}");
+                eprintln!("engram: error: ingest failed: {error}");
                 1
             }
         },
@@ -369,13 +390,13 @@ async fn dispatch(command: Command) -> i32 {
                         0
                     }
                     Err(error) => {
-                        eprintln!("mnemos: error: failed to encode results: {error}");
+                        eprintln!("engram: error: failed to encode results: {error}");
                         1
                     }
                 }
             }
             Err(error) => {
-                eprintln!("mnemos: error: recall failed: {error}");
+                eprintln!("engram: error: recall failed: {error}");
                 1
             }
         },
@@ -388,7 +409,7 @@ async fn dispatch(command: Command) -> i32 {
                 0
             }
             Err(error) => {
-                eprintln!("mnemos: error: reward failed: {error}");
+                eprintln!("engram: error: reward failed: {error}");
                 1
             }
         },
@@ -399,12 +420,12 @@ async fn dispatch(command: Command) -> i32 {
                     0
                 }
                 Err(error) => {
-                    eprintln!("mnemos: error: failed to encode report: {error}");
+                    eprintln!("engram: error: failed to encode report: {error}");
                     1
                 }
             },
             Err(error) => {
-                eprintln!("mnemos: error: consolidate failed: {error}");
+                eprintln!("engram: error: consolidate failed: {error}");
                 1
             }
         },
@@ -415,12 +436,12 @@ async fn dispatch(command: Command) -> i32 {
                     0
                 }
                 Err(error) => {
-                    eprintln!("mnemos: error: failed to encode stats: {error}");
+                    eprintln!("engram: error: failed to encode stats: {error}");
                     1
                 }
             },
             Err(error) => {
-                eprintln!("mnemos: error: stats failed: {error}");
+                eprintln!("engram: error: stats failed: {error}");
                 1
             }
         },
@@ -429,21 +450,21 @@ async fn dispatch(command: Command) -> i32 {
         Command::McpServer => match mnemos_mcp_server::run(cli).await {
             Ok(()) => 0,
             Err(error) => {
-                eprintln!("mnemos: error: mcp-server failed: {error}");
+                eprintln!("engram: error: mcp-server failed: {error}");
                 1
             }
         },
         Command::McpTools => match mnemos_mcp_tools::run(cli).await {
             Ok(()) => 0,
             Err(error) => {
-                eprintln!("mnemos: error: mcp-tools failed: {error}");
+                eprintln!("engram: error: mcp-tools failed: {error}");
                 1
             }
         },
         Command::Help | Command::Invalid {
             ..
         } => {
-            eprintln!("mnemos: error: unexpected command\n{}", usage());
+            eprintln!("engram: error: unexpected command\n{}", usage());
             2
         }
     }
@@ -451,6 +472,7 @@ async fn dispatch(command: Command) -> i32 {
 
 #[tokio::main]
 async fn main() {
+    load_env_files();
     let code = run(std::env::args().collect()).await;
     if code != 0 {
         std::process::exit(code);

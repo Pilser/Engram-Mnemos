@@ -32,12 +32,18 @@ impl OpenAiEmbeddingProvider {
 
     /// Build from unified [`LlmConfig`].
     ///
-    /// Uses the [`LlmConfig::embedding_model`] field (not [`LlmConfig::model`]).
+    /// Uses the [`LlmConfig::embedding_model`] field (not [`LlmConfig::model`])
+    /// and `embedding_base_url` when set (falls back to `base_url`).
     #[must_use]
     pub fn from_config(config: &LlmConfig) -> Self {
+        let base = if config.embedding_base_url.trim().is_empty() {
+            config.base_url.clone()
+        } else {
+            config.embedding_base_url.clone()
+        };
         Self::new(
             config.embedding_model.clone(),
-            config.base_url.clone(),
+            base,
             config.api_key.clone(),
         )
     }
@@ -214,6 +220,7 @@ mod tests {
             base_url: "http://localhost:11434/v1/".into(),
             model: "llama".into(),
             embedding_model: "emb".into(),
+            embedding_base_url: "http://localhost:11434/v1".into(),
         };
         let p = OpenAiEmbeddingProvider::from_config(&cfg);
         assert_eq!(p.model(), "emb");

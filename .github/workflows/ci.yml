@@ -60,11 +60,11 @@ jobs:
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
         run: cargo build -p mnemos-app --release
 
-      - name: Upload nmose binary
+      - name: Upload engram binary
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: nmose-linux-x86_64
-          path: target/release/nmose
+          name: engram-linux-x86_64
+          path: target/release/engram
           retention-days: 14
           if-no-files-found: error

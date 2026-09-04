@@ -83,6 +83,7 @@ fastembed = { version = "6.0", default-features = false, features = ["ort-downlo
 hyper = { version = "1", default-features = false, features = ["server", "http1"] }
 tower = { version = "0.5", features = ["util"] }
 hdbscan = "0.12"
+dotenvy = "0.15"
 
 [profile.release]
 opt-level = 3

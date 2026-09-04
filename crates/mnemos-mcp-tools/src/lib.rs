@@ -5,11 +5,11 @@
 //!
 //! | Tool | Params | Returns (JSON string) |
 //! |------|--------|---------------------|
-//! | `mnemos_ingest` | `{ text }` | `{ "engram_id": … }` |
-//! | `mnemos_recall` | `{ query, limit? }` (default `limit` = 10) | `{ "results": […] }` |
-//! | `mnemos_reward` | `{ attributions: number[], score }` | `{ "ok": true }` |
-//! | `mnemos_consolidate` | `{}` | `{ "report": {…} }` |
-//! | `mnemos_stats` | `{}` | `{ "stats": {…} }` |
+//! | `engram_ingest` | `{ text }` | `{ "engram_id": … }` |
+//! | `engram_recall` | `{ query, limit? }` (default `limit` = 10) | `{ "results": […] }` |
+//! | `engram_reward` | `{ attributions: number[], score }` | `{ "ok": true }` |
+//! | `engram_consolidate` | `{}` | `{ "report": {…} }` |
+//! | `engram_stats` | `{}` | `{ "stats": {…} }` |
 //! | `help` | `{ tool? }` | per-tool usage or tool list |
 //!
 //! Two-layer help:
@@ -32,7 +32,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Default `limit` for `mnemos_recall` when the caller omits it.
+/// Default `limit` for `engram_recall` when the caller omits it.
 pub const DEFAULT_RECALL_LIMIT: usize = 10;
 
 /// Resolve the serde default for [`RecallParams::limit`].
@@ -54,14 +54,14 @@ fn to_json_string(payload: impl Serialize) -> Result<String, ErrorData> {
     serde_json::to_string(&payload).map_err(internal_error)
 }
 
-/// Params for `mnemos_ingest`.
+/// Params for `engram_ingest`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct IngestParams {
     /// Raw episode text to ingest into memory.
     pub text: String,
 }
 
-/// Params for `mnemos_recall`.
+/// Params for `engram_recall`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct RecallParams {
     /// Natural-language query to resonate against.
@@ -79,7 +79,7 @@ impl RecallParams {
     }
 }
 
-/// Params for `mnemos_reward`.
+/// Params for `engram_reward`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct RewardParams {
     /// Per-engram attribution weights.
@@ -87,7 +87,7 @@ pub struct RewardParams {
     pub attributions: Vec<f64>,
     /// Scalar reward signal.
     pub score: f64,
-    /// Optional ledger recall id from a prior `mnemos_recall` (parallel-safe reward).
+    /// Optional ledger recall id from a prior `engram_recall` (parallel-safe reward).
     #[serde(default)]
     pub recall_id: Option<u64>,
 }
@@ -134,8 +134,8 @@ impl MnemosMcpTools {
 impl MnemosMcpTools {
     /// Ingest a text episode; returns `{ "engram_id": … }`.
     #[tool(
-        name = "mnemos_ingest",
-        description = "Ingest a text episode into memory. Returns the new engram id as JSON. Call help with tool=\"mnemos_ingest\" for full usage."
+        name = "engram_ingest",
+        description = "Ingest a text episode into memory. Returns the new engram id as JSON. Call help with tool=\"engram_ingest\" for full usage."
     )]
     pub async fn ingest(
         &self,
@@ -151,8 +151,8 @@ impl MnemosMcpTools {
 
     /// Recall resonant engrams; returns `{ "results": […], "recall_id": … }`.
     #[tool(
-        name = "mnemos_recall",
-        description = "Recall engrams resonating with a query. Optional limit defaults to 10. Returns results as JSON. Call help with tool=\"mnemos_recall\" for full usage."
+        name = "engram_recall",
+        description = "Recall engrams resonating with a query. Optional limit defaults to 10. Returns results as JSON. Call help with tool=\"engram_recall\" for full usage."
     )]
     pub async fn recall(
         &self,
@@ -169,8 +169,8 @@ impl MnemosMcpTools {
 
     /// Apply a reward signal; returns `{ "ok": true }`.
     #[tool(
-        name = "mnemos_reward",
-        description = "Apply a scalar reward signal with per-engram attributions. Returns ok flag as JSON. Call help with tool=\"mnemos_reward\" for full usage."
+        name = "engram_reward",
+        description = "Apply a scalar reward signal with per-engram attributions. Returns ok flag as JSON. Call help with tool=\"engram_reward\" for full usage."
     )]
     pub async fn reward(
         &self,
@@ -192,8 +192,8 @@ impl MnemosMcpTools {
 
     /// Run a consolidation cycle; returns `{ "report": {…} }`.
     #[tool(
-        name = "mnemos_consolidate",
-        description = "Run one memory consolidation (sleep) cycle. Returns the consolidation report as JSON. Call help with tool=\"mnemos_consolidate\" for full usage."
+        name = "engram_consolidate",
+        description = "Run one memory consolidation (sleep) cycle. Returns the consolidation report as JSON. Call help with tool=\"engram_consolidate\" for full usage."
     )]
     pub async fn consolidate(&self) -> Result<String, ErrorData> {
         let report = self.cli.consolidate().await.map_err(internal_error)?;
@@ -202,8 +202,8 @@ impl MnemosMcpTools {
 
     /// Fetch aggregate memory stats; returns `{ "stats": {…} }`.
     #[tool(
-        name = "mnemos_stats",
-        description = "Fetch aggregate memory stats (engrams, concepts, identities). Returns stats as JSON. Call help with tool=\"mnemos_stats\" for full usage."
+        name = "engram_stats",
+        description = "Fetch aggregate memory stats (engrams, concepts, identities). Returns stats as JSON. Call help with tool=\"engram_stats\" for full usage."
     )]
     pub async fn stats(&self) -> Result<String, ErrorData> {
         let stats = self.cli.stats().await.map_err(internal_error)?;
@@ -225,15 +225,15 @@ impl MnemosMcpTools {
     ) -> Result<String, ErrorData> {
         let response = match params.tool.as_deref() {
             None => tool_list(),
-            Some("mnemos_ingest") => help_ingest(),
-            Some("mnemos_recall") => help_recall(),
-            Some("mnemos_reward") => help_reward(),
-            Some("mnemos_consolidate") => help_consolidate(),
-            Some("mnemos_stats") => help_stats(),
+            Some("engram_ingest") => help_ingest(),
+            Some("engram_recall") => help_recall(),
+            Some("engram_reward") => help_reward(),
+            Some("engram_consolidate") => help_consolidate(),
+            Some("engram_stats") => help_stats(),
             Some("help") => help_help(),
             Some(other) => {
                 return Err(ErrorData::invalid_params(
-                    format!("unknown tool: {other}. valid: mnemos_ingest, mnemos_recall, mnemos_reward, mnemos_consolidate, mnemos_stats, help"),
+                    format!("unknown tool: {other}. valid: engram_ingest, engram_recall, engram_reward, engram_consolidate, engram_stats, help"),
                     None,
                 ));
             }
@@ -245,26 +245,26 @@ impl MnemosMcpTools {
 /// One-line summary of every tool (layer-1 help extended).
 fn tool_list() -> String {
     "mnemos memory tools (call help with tool=\"<name>\" for full usage):\n\
-     - mnemos_ingest: Ingest a text episode into memory.\n\
-     - mnemos_recall: Recall engrams resonating with a query.\n\
-     - mnemos_reward: Apply a scalar reward signal with per-engram attributions.\n\
-     - mnemos_consolidate: Run one memory consolidation (sleep) cycle.\n\
-     - mnemos_stats: Fetch aggregate memory stats (engrams, concepts, identities).\n\
+     - engram_ingest: Ingest a text episode into memory.\n\
+     - engram_recall: Recall engrams resonating with a query.\n\
+     - engram_reward: Apply a scalar reward signal with per-engram attributions.\n\
+     - engram_consolidate: Run one memory consolidation (sleep) cycle.\n\
+     - engram_stats: Fetch aggregate memory stats (engrams, concepts, identities).\n\
      - help: Get usage help (this list, or per-tool detail).".to_string()
 }
 
-/// Full usage for `mnemos_ingest`.
+/// Full usage for `engram_ingest`.
 fn help_ingest() -> String {
-    "mnemos_ingest: Ingest a text episode into memory.\n\
+    "engram_ingest: Ingest a text episode into memory.\n\
      Params:\n\
        text (string, required): Raw episode text to ingest.\n\
      Example: {\"text\": \"the sky is blue\"}\n\
      Returns: {\"engram_id\": 42}".to_string()
 }
 
-/// Full usage for `mnemos_recall`.
+/// Full usage for `engram_recall`.
 fn help_recall() -> String {
-    "mnemos_recall: Recall engrams resonating with a query.\n\
+    "engram_recall: Recall engrams resonating with a query.\n\
      Params:\n\
        query (string, required): Natural-language query to resonate against.\n\
        limit (integer, optional, default 10): Max results to return.\n\
@@ -272,29 +272,29 @@ fn help_recall() -> String {
      Returns: {\"results\": [...]}".to_string()
 }
 
-/// Full usage for `mnemos_reward`.
+/// Full usage for `engram_reward`.
 fn help_reward() -> String {
-    "mnemos_reward: Apply a scalar reward signal with per-engram attributions.\n\
+    "engram_reward: Apply a scalar reward signal with per-engram attributions.\n\
       Params:\n\
         attributions (array of numbers, optional, default []): Per-engram attribution weights.\n\
         score (number, required): Scalar reward signal.\n\
-        recall_id (integer, optional): Ledger recall id from a prior mnemos_recall (parallel-safe reward).\n\
+        recall_id (integer, optional): Ledger recall id from a prior engram_recall (parallel-safe reward).\n\
       Example: {\"attributions\": [0.5, 0.5], \"score\": 1.0}\n\
       Example (ledger): {\"recall_id\": 42, \"score\": 1.0}\n\
       Returns: {\"ok\": true}".to_string()
 }
 
-/// Full usage for `mnemos_consolidate`.
+/// Full usage for `engram_consolidate`.
 fn help_consolidate() -> String {
-    "mnemos_consolidate: Run one memory consolidation (sleep) cycle.\n\
+    "engram_consolidate: Run one memory consolidation (sleep) cycle.\n\
      Params: none.\n\
      Example: {}\n\
      Returns: {\"report\": {\"pruned\": 0, \"compressed\": 0, \"promoted\": 0, \"contradictions_linked\": 0}}".to_string()
 }
 
-/// Full usage for `mnemos_stats`.
+/// Full usage for `engram_stats`.
 fn help_stats() -> String {
-    "mnemos_stats: Fetch aggregate memory stats (engrams, concepts, identities).\n\
+    "engram_stats: Fetch aggregate memory stats (engrams, concepts, identities).\n\
      Params: none.\n\
      Example: {}\n\
      Returns: {\"stats\": {\"total_engrams\": 0, \"contradictions\": 0, \"concepts\": 0, \"identities\": 0}}".to_string()
@@ -305,7 +305,7 @@ fn help_help() -> String {
     "help: Get usage help for mnemos memory tools.\n\
      Params:\n\
        tool (string, optional): Tool name to get detailed usage for. Omit for a full tool list.\n\
-     Example: {\"tool\": \"mnemos_recall\"}\n\
+     Example: {\"tool\": \"engram_recall\"}\n\
      Returns: full usage text (params, types, example JSON) for the named tool.".to_string()
 }
 
@@ -373,20 +373,20 @@ mod tests {
     #[test]
     fn help_params_accepts_tool_name() {
         let params: HelpParams =
-            serde_json::from_value(json!({ "tool": "mnemos_recall" }))
+            serde_json::from_value(json!({ "tool": "engram_recall" }))
                 .expect("tool param must deserialize");
-        assert_eq!(params.tool.as_deref(), Some("mnemos_recall"));
+        assert_eq!(params.tool.as_deref(), Some("engram_recall"));
     }
 
     #[test]
     fn tool_list_mentions_all_tools() {
         let list = tool_list();
         for name in [
-            "mnemos_ingest",
-            "mnemos_recall",
-            "mnemos_reward",
-            "mnemos_consolidate",
-            "mnemos_stats",
+            "engram_ingest",
+            "engram_recall",
+            "engram_reward",
+            "engram_consolidate",
+            "engram_stats",
             "help",
         ] {
             assert!(list.contains(name), "tool list should mention {name}");
@@ -396,11 +396,11 @@ mod tests {
     #[test]
     fn per_tool_help_includes_params_and_example() {
         for (name, help_text) in [
-            ("mnemos_ingest", help_ingest()),
-            ("mnemos_recall", help_recall()),
-            ("mnemos_reward", help_reward()),
-            ("mnemos_consolidate", help_consolidate()),
-            ("mnemos_stats", help_stats()),
+            ("engram_ingest", help_ingest()),
+            ("engram_recall", help_recall()),
+            ("engram_reward", help_reward()),
+            ("engram_consolidate", help_consolidate()),
+            ("engram_stats", help_stats()),
             ("help", help_help()),
         ] {
             assert!(

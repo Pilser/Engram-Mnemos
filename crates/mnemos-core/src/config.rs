@@ -185,6 +185,10 @@ pub struct LlmConfig {
     pub base_url: String,
     pub model: String,
     pub embedding_model: String,
+    /// Optional separate base URL for embeddings (e.g. local Docker `http://localhost:8699/v1`).
+    /// Falls back to `base_url` when unset.
+    #[serde(default)]
+    pub embedding_base_url: String,
 }
 
 impl Default for LlmConfig {
@@ -196,14 +200,20 @@ impl Default for LlmConfig {
 impl LlmConfig {
     #[must_use]
     pub fn from_env() -> Self {
+        let base_url = std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let embedding_base_url = std::env::var("EMBEDDING_BASE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| base_url.clone());
         Self {
             api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
-            base_url: std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            base_url,
             model: std::env::var("LLM_MODEL")
                 .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
             embedding_model: std::env::var("EMBEDDING_MODEL")
                 .unwrap_or_else(|_| "text-embedding-3-small".to_string()),
+            embedding_base_url,
         }
     }
 }
