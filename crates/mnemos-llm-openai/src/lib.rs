@@ -72,13 +72,6 @@ impl OpenAiCompatibleProvider {
         messages: serde_json::Value,
         json_mode: bool,
     ) -> Result<String> {
-        eprintln!(
-            "mnemos-llm-openai: POST {}/chat/completions model={} key_len={} json_mode={}",
-            self.base_url,
-            self.model,
-            self.api_key.len(),
-            json_mode
-        );
         let start = std::time::Instant::now();
         let mut body = serde_json::json!({
             "model": self.model,
