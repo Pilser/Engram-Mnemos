@@ -1,0 +1,24 @@
+[package]
+name = "mnemos-mitosis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mnemos-core = { workspace = true }
+mnemos-storage = { path = "../mnemos-storage" }
+mnemos-llm-trait = { path = "../mnemos-llm-trait" }
+mnemos-telemetry = { path = "../mnemos-telemetry" }
+helix-db = { workspace = true }
+hdbscan = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "mnemos-mcp-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mnemos-core = { workspace = true }
+mnemos-cli = { path = "../mnemos-cli" }
+mnemos-storage = { path = "../mnemos-storage" }
+mnemos-embedding-trait = { path = "../mnemos-embedding-trait" }
+mnemos-contradiction = { path = "../mnemos-contradiction" }
+mnemos-telemetry = { path = "../mnemos-telemetry" }
+mnemos-ml-trait = { path = "../mnemos-ml-trait" }
+rmcp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+helix-db = { workspace = true }
+schemars = "1"
+
+[lints]
+workspace = true

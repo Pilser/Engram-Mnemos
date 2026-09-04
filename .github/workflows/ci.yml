@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install wild linker
+        uses: wild-linker/action@v1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shared cache across branches — main warms, PRs restore
+          shared-key: "ci"
+          # Don't thrash cache on every PR push
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      # Release artifact only on main (expensive — skip on PRs)
+      - name: cargo build (release)
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        run: cargo build -p mnemos-app --release
+
+      - name: Upload mnemos binary
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnemos-linux-x86_64
+          path: target/release/mnemos
+          retention-days: 14
+          if-no-files-found: error

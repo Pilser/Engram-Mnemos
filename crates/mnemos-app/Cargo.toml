@@ -1,0 +1,39 @@
+[package]
+name = "mnemos-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mnemos"
+path = "src/main.rs"
+
+[dependencies]
+mnemos-core = { workspace = true }
+mnemos-storage = { workspace = true }
+mnemos-llm-trait = { workspace = true }
+mnemos-llm-openai = { workspace = true }
+mnemos-llm-anthropic = { workspace = true }
+mnemos-llm-local = { workspace = true }
+mnemos-embedding-trait = { workspace = true }
+mnemos-embedding-openai = { workspace = true }
+mnemos-embedding-local = { workspace = true }
+mnemos-ml-trait = { workspace = true }
+mnemos-emotional-tagger = { workspace = true }
+mnemos-importance-scorer = { workspace = true }
+mnemos-concept-extractor = { workspace = true }
+mnemos-ingestion = { workspace = true }
+mnemos-retrieval = { workspace = true }
+mnemos-consolidation = { workspace = true }
+mnemos-stimulation = { workspace = true }
+mnemos-edge-weights = { workspace = true }
+mnemos-cli = { workspace = true }
+mnemos-mcp-server = { workspace = true }
+mnemos-mcp-tools = { workspace = true }
+mnemos-contradiction = { workspace = true }
+mnemos-mitosis = { workspace = true }
+mnemos-telemetry = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+[lints]
+workspace = true

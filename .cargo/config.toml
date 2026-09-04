@@ -1,0 +1,19 @@
+# Linker configuration for faster builds.
+# Wild is a pure Rust linker, faster than lld, no clang needed.
+# Install: cargo install wild-linker OR use wild-linker/action in CI.
+# For CI, the wild-linker/action handles installation automatically.
+#
+# ENABLED 2026-09-04: wild 0.10.0 installed at ~/.cargo/bin/wild
+# (+ ld.wild symlink), clang 19 present.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=wild"]
+
+# Fallback to lld if wild is not installed:
+# [target.x86_64-unknown-linux-gnu]
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# Mold (fastest, needs clang+mold):
+# [target.x86_64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]

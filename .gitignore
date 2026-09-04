@@ -1,0 +1,40 @@
+# WHITELIST APPROACH: Ignore everything except what we explicitly track.
+
+# Ignore all files by default
+*
+
+# Track these specific files and directories
+!.gitignore
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!.cargo/
+!.cargo/config.toml
+!.github/
+!.github/workflows/
+!.github/workflows/ci.yml
+!crates/
+!crates/**
+!tests/
+!tests/**
+!examples/
+!examples/**
+!docs/
+!docs/**
+!.env.example
+!README.md
+!LICENSE
+
+# Still ignore common unwanted files even in tracked directories
+**/.DS_Store
+**/Thumbs.db
+**/*.swp
+**/*.swo
+**/*~
+**/.vscode/
+**/.idea/
+**/*.iml
+**/target/
+**/*.log
+**/*.tmp
+**/*.bak

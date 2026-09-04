@@ -1,0 +1,23 @@
+[package]
+name = "mnemos-mcp-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mnemos-core = { workspace = true }
+mnemos-cli = { path = "../mnemos-cli" }
+mnemos-mcp-server = { path = "../mnemos-mcp-server" }
+mnemos-mcp-tools = { path = "../mnemos-mcp-tools" }
+mnemos-mcp-protocol = { path = "../mnemos-mcp-protocol" }
+mnemos-telemetry = { path = "../mnemos-telemetry" }
+rmcp = { workspace = true }
+hyper = { workspace = true }
+tower = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+bytes = "1"
+http-body-util = "0.1"
+
+[lints]
+workspace = true

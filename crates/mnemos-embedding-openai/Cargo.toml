@@ -1,0 +1,16 @@
+[package]
+name = "mnemos-embedding-openai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+mnemos-core = { workspace = true }
+mnemos-embedding-trait = { path = "../mnemos-embedding-trait" }
+mnemos-telemetry = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "mnemos-embedding-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+mnemos-core = { workspace = true }
+mnemos-embedding-trait = { path = "../mnemos-embedding-trait" }
+mnemos-telemetry = { workspace = true }
+fastembed = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+[lints]
+workspace = true

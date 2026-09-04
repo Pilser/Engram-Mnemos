@@ -1,0 +1,22 @@
+[package]
+name = "mnemos-ingestion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+mnemos-core = { workspace = true }
+mnemos-storage = { path = "../mnemos-storage" }
+mnemos-ml-trait = { path = "../mnemos-ml-trait" }
+mnemos-embedding-trait = { path = "../mnemos-embedding-trait" }
+mnemos-contradiction = { path = "../mnemos-contradiction" }
+mnemos-telemetry = { workspace = true }
+helix-db = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+[dev-dependencies]
+tokio = { workspace = true }
+[lints]
+workspace = true

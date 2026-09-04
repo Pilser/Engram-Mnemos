@@ -1,0 +1,31 @@
+[package]
+name = "mnemos-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mnemos-core = { workspace = true }
+mnemos-storage = { path = "../mnemos-storage" }
+mnemos-ingestion = { path = "../mnemos-ingestion" }
+mnemos-retrieval = { path = "../mnemos-retrieval" }
+mnemos-consolidation = { path = "../mnemos-consolidation" }
+mnemos-contradiction = { path = "../mnemos-contradiction" }
+mnemos-mitosis = { path = "../mnemos-mitosis" }
+mnemos-telemetry = { workspace = true }
+helix-db = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
+mnemos-ml-trait = { workspace = true }
+mnemos-embedding-trait = { workspace = true }
+mnemos-stimulation = { workspace = true }
+mnemos-edge-weights = { workspace = true }
+
+[lints]
+workspace = true

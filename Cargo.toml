@@ -1,0 +1,96 @@
+[workspace]
+members = [
+    "crates/mnemos-core",
+    "crates/mnemos-storage",
+    "crates/mnemos-llm-trait",
+    "crates/mnemos-llm-openai",
+    "crates/mnemos-llm-anthropic",
+    "crates/mnemos-ml-trait",
+    "crates/mnemos-emotional-tagger",
+    "crates/mnemos-importance-scorer",
+    "crates/mnemos-concept-extractor",
+    "crates/mnemos-edge-weights",
+    "crates/mnemos-embedding-trait",
+    "crates/mnemos-consolidation",
+    "crates/mnemos-stimulation",
+    "crates/mnemos-retrieval",
+    "crates/mnemos-ingestion",
+    "crates/mnemos-cli",
+    "crates/mnemos-mcp-server",
+    "crates/mnemos-llm-local",
+    "crates/mnemos-embedding-openai",
+    "crates/mnemos-embedding-local",
+    "crates/mnemos-mcp-tools",
+    "crates/mnemos-app",
+    "crates/mnemos-telemetry",
+    "crates/mnemos-contradiction",
+    "crates/mnemos-mcp-protocol",
+    "crates/mnemos-mcp-http",
+    "crates/mnemos-mitosis",
+]
+# Phase-gated expansion (append per phase as crates land):
+# Phase 1b: mnemos-storage, mnemos-llm-trait, mnemos-llm-openai
+# Phase 2: mnemos-ml-trait, mnemos-emotional-tagger, mnemos-importance-scorer, mnemos-concept-extractor
+# Phase 3: mnemos-ingestion, mnemos-edge-weights, mnemos-stimulation, mnemos-retrieval, mnemos-consolidation
+# Phase 4: mnemos-cli, mnemos-mcp-server, mnemos-mcp-tools, mnemos-app
+# Phase 5: mnemos-llm-anthropic, mnemos-llm-local, mnemos-embedding-trait, mnemos-embedding-openai, mnemos-embedding-local
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+mnemos-core = { path = "crates/mnemos-core" }
+mnemos-storage = { path = "crates/mnemos-storage" }
+mnemos-llm-trait = { path = "crates/mnemos-llm-trait" }
+mnemos-llm-openai = { path = "crates/mnemos-llm-openai" }
+mnemos-ml-trait = { path = "crates/mnemos-ml-trait" }
+mnemos-emotional-tagger = { path = "crates/mnemos-emotional-tagger" }
+mnemos-importance-scorer = { path = "crates/mnemos-importance-scorer" }
+mnemos-concept-extractor = { path = "crates/mnemos-concept-extractor" }
+mnemos-stimulation = { path = "crates/mnemos-stimulation" }
+mnemos-edge-weights = { path = "crates/mnemos-edge-weights" }
+mnemos-embedding-trait = { path = "crates/mnemos-embedding-trait" }
+mnemos-consolidation = { path = "crates/mnemos-consolidation" }
+mnemos-ingestion = { path = "crates/mnemos-ingestion" }
+mnemos-llm-local = { path = "crates/mnemos-llm-local" }
+mnemos-embedding-openai = { path = "crates/mnemos-embedding-openai" }
+mnemos-retrieval = { path = "crates/mnemos-retrieval" }
+mnemos-embedding-local = { path = "crates/mnemos-embedding-local" }
+mnemos-llm-anthropic = { path = "crates/mnemos-llm-anthropic" }
+mnemos-cli = { path = "crates/mnemos-cli" }
+mnemos-mcp-server = { path = "crates/mnemos-mcp-server" }
+mnemos-mcp-tools = { path = "crates/mnemos-mcp-tools" }
+mnemos-telemetry = { path = "crates/mnemos-telemetry" }
+mnemos-contradiction = { path = "crates/mnemos-contradiction" }
+mnemos-mcp-protocol = { path = "crates/mnemos-mcp-protocol" }
+mnemos-mcp-http = { path = "crates/mnemos-mcp-http" }
+mnemos-mitosis = { path = "crates/mnemos-mitosis" }
+mnemos-app = { path = "crates/mnemos-app" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
+async-trait = "0.1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+helix-db = { git = "https://github.com/helixdb/helix-db", branch = "main", features = ["embedded"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rmcp = { version = "3.2", features = ["transport-io", "transport-streamable-http-server"] }
+fastembed = { version = "6.0", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+tower = { version = "0.5", features = ["util"] }
+hdbscan = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+debug = false
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

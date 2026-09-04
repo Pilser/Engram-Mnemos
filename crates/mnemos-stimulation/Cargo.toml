@@ -1,0 +1,17 @@
+[package]
+name = "mnemos-stimulation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+mnemos-core = { workspace = true }
+mnemos-storage = { path = "../mnemos-storage" }
+mnemos-edge-weights = { path = "../mnemos-edge-weights" }
+helix-db = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+[dev-dependencies]
+tokio = { workspace = true }
+[lints]
+workspace = true

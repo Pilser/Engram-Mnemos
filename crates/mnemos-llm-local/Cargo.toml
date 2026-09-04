@@ -1,0 +1,15 @@
+[package]
+name = "mnemos-llm-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+mnemos-core = { workspace = true }
+mnemos-llm-trait = { path = "../mnemos-llm-trait" }
+mnemos-llm-openai = { path = "../mnemos-llm-openai" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+[lints]
+workspace = true
