@@ -2,8 +2,8 @@
 //!
 //! Every fallible operation records an [`Event`] (what ran, where, whether it
 //! worked, why not, how long it took). Events live in a bounded in-memory
-//! ring and, when `MNEMOS_TELEMETRY_FILE` is set, are appended as JSONL for
-//! offline analysis.
+//! ring and are appended as JSONL to **per-day files** (`YYYY-MM-DD.jsonl`)
+//! inside the telemetry folder for dashboard use and offline analysis.
 //!
 //! Use the [`global`] instance from any crate — no plumbing required:
 //!
@@ -23,6 +23,7 @@
 //! ```
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -128,10 +129,23 @@ pub struct Diagnosis {
     pub recent_failures: Vec<Event>,
 }
 
-/// Bounded recorder with optional JSONL file sink.
+/// Metadata for one per-day telemetry file (dashboard file manager).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryFile {
+    /// File name, always `YYYY-MM-DD.jsonl`.
+    pub name: String,
+    /// Date part (`YYYY-MM-DD`).
+    pub date: String,
+    /// Size in bytes.
+    pub size_bytes: u64,
+    /// Number of parseable event lines.
+    pub events: usize,
+}
+
+/// Bounded recorder with per-day JSONL file sink.
 pub struct Telemetry {
     inner: Mutex<Inner>,
-    file_path: Option<String>,
+    dir: Option<PathBuf>,
 }
 
 struct Inner {
@@ -141,25 +155,32 @@ struct Inner {
     counters: HashMap<String, Counter>,
     weights_history: VecDeque<WeightSnapshot>,
     system_history: VecDeque<SystemStatsSnapshot>,
+    /// Cached open file handle: (date `YYYY-MM-DD`, file). Rotated when the
+    /// UTC date changes so each day gets its own file.
+    file: Option<(String, std::fs::File)>,
 }
 
 impl Telemetry {
     /// Build from env: `MNEMOS_TELEMETRY` (`1`/`true`/`yes`, default on),
-    /// `MNEMOS_TELEMETRY_FILE` (JSONL append sink, default off — set via env or `.env` next to binary).
+    /// `MNEMOS_TELEMETRY_DIR` (folder holding per-day `YYYY-MM-DD.jsonl`
+    /// files, default `./data/helix/telemetry`).
     #[must_use]
     pub fn from_env() -> Self {
         let enabled = std::env::var("MNEMOS_TELEMETRY").ok().is_none_or(|v| {
             matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
         });
-        let file_path = std::env::var("MNEMOS_TELEMETRY_FILE")
+        let dir = std::env::var("MNEMOS_TELEMETRY_DIR")
             .ok()
-            .filter(|s| !s.is_empty());
-        Self::new(enabled, file_path)
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| Some(PathBuf::from("./data/helix/telemetry")));
+        Self::new(enabled, dir)
     }
 
     /// Build explicitly (tests, embedding in other config systems).
+    /// `dir` receives per-day `YYYY-MM-DD.jsonl` files; `None` disables files.
     #[must_use]
-    pub fn new(enabled: bool, file_path: Option<String>) -> Self {
+    pub fn new(enabled: bool, dir: Option<PathBuf>) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 enabled,
@@ -168,8 +189,9 @@ impl Telemetry {
                 counters: HashMap::new(),
                 weights_history: VecDeque::with_capacity(MAX_SNAPSHOTS.min(32)),
                 system_history: VecDeque::with_capacity(MAX_SNAPSHOTS.min(32)),
+                file: None,
             }),
-            file_path,
+            dir,
         }
     }
 
@@ -232,15 +254,30 @@ impl Telemetry {
     }
 
     fn push_event(&self, event: Event) {
-        if let Some(path) = &self.file_path {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
-                if let Ok(line) = serde_json::to_string(&event) {
-                    use std::io::Write as _;
-                    let _ = writeln!(f, "{line}");
+        if let Some(dir) = &self.dir.clone() {
+            // Append to today's file; rotate the cached handle on date change.
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let _ = std::fs::create_dir_all(dir);
+            if let Ok(line) = serde_json::to_string(&event) {
+                use std::io::Write as _;
+                if let Ok(mut inner) = self.inner.lock() {
+                    let same_day = inner
+                        .file
+                        .as_ref()
+                        .is_some_and(|(d, _)| d == &today);
+                    if !same_day {
+                        let path = dir.join(format!("{today}.jsonl"));
+                        if let Ok(f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                        {
+                            inner.file = Some((today, f));
+                        }
+                    }
+                    if let Some((_, f)) = inner.file.as_mut() {
+                        let _ = writeln!(f, "{line}");
+                    }
                 }
             }
         }
@@ -423,6 +460,109 @@ impl Telemetry {
             .unwrap_or_default()
     }
 
+    /// Validate a `YYYY-MM-DD` date string (strict — prevents path traversal).
+    #[must_use]
+    pub fn valid_date(date: &str) -> bool {
+        let b = date.as_bytes();
+        if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+            return false;
+        }
+        for (i, c) in b.iter().enumerate() {
+            if i == 4 || i == 7 {
+                continue;
+            }
+            if !c.is_ascii_digit() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Today's date as `YYYY-MM-DD` (UTC).
+    #[must_use]
+    pub fn today() -> String {
+        chrono::Utc::now().format("%Y-%m-%d").to_string()
+    }
+
+    /// List per-day telemetry files (newest first) for the dashboard file manager.
+    /// Returns empty when no dir is configured.
+    pub fn telemetry_files(&self) -> Vec<TelemetryFile> {
+        let Some(dir) = &self.dir else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut files: Vec<TelemetryFile> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == "jsonl")
+                    && p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(Self::valid_date)
+            })
+            .filter_map(|p| {
+                let meta = std::fs::metadata(&p).ok()?;
+                let name = p.file_name()?.to_str()?.to_string();
+                let date = name.trim_end_matches(".jsonl").to_string();
+                // Count parseable event lines (cheap scan, no full load).
+                let content = std::fs::read_to_string(&p).unwrap_or_default();
+                let events = content
+                    .lines()
+                    .filter(|l| serde_json::from_str::<Event>(l).is_ok())
+                    .count();
+                Some(TelemetryFile {
+                    name,
+                    date,
+                    size_bytes: meta.len(),
+                    events,
+                })
+            })
+            .collect();
+        files.sort_by(|a, b| b.date.cmp(&a.date));
+        files
+    }
+
+    /// Read events from one per-day file (newest first).
+    ///
+    /// `limit`/`offset` page through the file (defaults 200/0, capped at 5000).
+    /// `ok_only`: `Some(true)` keeps successes, `Some(false)` keeps failures,
+    /// `None` keeps all. Returns `None` for an invalid date or missing dir/file.
+    pub fn read_file(
+        &self,
+        date: &str,
+        limit: usize,
+        offset: usize,
+        ok_only: Option<bool>,
+    ) -> Option<Vec<Event>> {
+        if !Self::valid_date(date) {
+            return None;
+        }
+        let dir = self.dir.as_ref()?;
+        let content = std::fs::read_to_string(dir.join(format!("{date}.jsonl"))).ok()?;
+        let limit = limit.min(5000);
+        let mut events: Vec<Event> = content
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Event>(l).ok())
+            .filter(|e| ok_only.is_none_or(|want| e.ok == want))
+            .collect();
+        events.reverse();
+        Some(events.into_iter().skip(offset).take(limit).collect())
+    }
+
+    /// Delete one per-day file. Returns `true` if a file was removed.
+    /// Invalid dates always return `false`.
+    pub fn delete_file(&self, date: &str) -> bool {
+        if !Self::valid_date(date) {
+            return false;
+        }
+        let Some(dir) = &self.dir else {
+            return false;
+        };
+        std::fs::remove_file(dir.join(format!("{date}.jsonl"))).is_ok()
+    }
+
     /// Full snapshot for `GET /telemetry` — everything a dashboard needs.
     pub fn full_snapshot(&self) -> serde_json::Value {
         let inner = match self.inner.lock() {
@@ -569,5 +709,55 @@ mod tests {
         assert_eq!(d.recent_failures.len(), 2);
         assert_eq!(d.recent_failures[0].detail, "third");
         assert_eq!(d.recent_failures[1].detail, "second");
+    }
+
+    #[test]
+    fn valid_date_accepts_only_ymd() {
+        assert!(Telemetry::valid_date("2026-09-05"));
+        assert!(!Telemetry::valid_date("../secret"));
+        assert!(!Telemetry::valid_date("2026-9-5"));
+        assert!(!Telemetry::valid_date("2026-09-05.jsonl"));
+        assert!(!Telemetry::valid_date(""));
+        assert!(!Telemetry::valid_date("2026/09/05"));
+    }
+
+    #[test]
+    fn day_files_list_read_delete() {
+        let dir = std::env::temp_dir().join(format!(
+            "mnemos-tel-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let t = Telemetry::new(true, Some(dir.clone()));
+        t.record("a", "x", true, "");
+        t.record("a", "y", false, "boom");
+        // A planted non-telemetry file must not appear.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "not telemetry").unwrap();
+
+        let files = t.telemetry_files();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].name.ends_with(".jsonl"));
+        assert_eq!(files[0].events, 2);
+
+        let read = t.read_file(&files[0].date, 200, 0, None).expect("read day");
+        assert_eq!(read.len(), 2);
+        assert!(!read[0].ok); // newest first
+        let fails = t
+            .read_file(&files[0].date, 200, 0, Some(false))
+            .expect("read fails");
+        assert_eq!(fails.len(), 1);
+        let paged = t
+            .read_file(&files[0].date, 1, 1, None)
+            .expect("read page");
+        assert_eq!(paged.len(), 1);
+
+        assert!(!t.delete_file("../evil"));
+        assert!(t.delete_file(&files[0].date));
+        assert!(t.telemetry_files().is_empty());
+        assert!(t.read_file(&files[0].date, 200, 0, None).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

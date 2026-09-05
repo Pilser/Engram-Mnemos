@@ -194,8 +194,61 @@ fn json_response(value: serde_json::Value) -> hyper::Response<HttpBody> {
         .expect("telemetry json response builds")
 }
 
-/// Handle `GET /telemetry*` paths (dashboard poll). Returns `Some(response)` if handled.
-fn handle_telemetry(path: &str, method: &hyper::Method) -> Option<hyper::Response<HttpBody>> {
+/// Parse a `k=v&k2=v2` query string into a map (no decoding — dashboard
+/// params are `[A-Za-z0-9_-]`).
+fn parse_query(query: Option<&str>) -> std::collections::HashMap<String, String> {
+    query
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            Some((parts.next()?.to_string(), parts.next().unwrap_or("").to_string()))
+        })
+        .collect()
+}
+
+/// Handle `GET /telemetry*` paths (dashboard poll) plus file management
+/// (`GET /telemetry/files`, `GET /telemetry/file?date=&limit=&offset=&ok=`,
+/// `DELETE /telemetry/file?date=`). Returns `Some(response)` if handled.
+fn handle_telemetry(
+    uri: &hyper::Uri,
+    method: &hyper::Method,
+) -> Option<hyper::Response<HttpBody>> {
+    let path = uri.path();
+    let clean = path.split(['?', '#']).next().unwrap_or(path);
+    if !clean.starts_with("/telemetry") {
+        return None;
+    }
+    let query = parse_query(uri.query());
+    let tele = mnemos_telemetry::global();
+    // File deletion (dashboard file manager).
+    if clean == "/telemetry/file" && *method == hyper::Method::DELETE {
+        let date = query.get("date").map(String::as_str).unwrap_or("");
+        let deleted = tele.delete_file(date);
+        let status = if deleted {
+            hyper::StatusCode::OK
+        } else {
+            hyper::StatusCode::NOT_FOUND
+        };
+        return Some(
+            hyper::Response::builder()
+                .status(status)
+                .header(hyper::header::CONTENT_TYPE, "application/json")
+                .body(
+                    Full::new(
+                        Bytes::from(
+                            serde_json::to_vec(&serde_json::json!({
+                                "deleted": deleted,
+                                "date": date,
+                            }))
+                            .unwrap_or_default(),
+                        ),
+                    )
+                    .boxed(),
+                )
+                .expect("delete response builds"),
+        );
+    }
     if *method != hyper::Method::GET {
         return Some(
             hyper::Response::builder()
@@ -204,16 +257,33 @@ fn handle_telemetry(path: &str, method: &hyper::Method) -> Option<hyper::Respons
                 .expect("405 builds"),
         );
     }
-    let clean = path.split(['?', '#']).next().unwrap_or(path);
     match clean {
-        "/telemetry" => Some(json_response(mnemos_telemetry::global().full_snapshot())),
-        "/telemetry/diagnose" => Some(json_response(serde_json::to_value(mnemos_telemetry::global().diagnose(20)).unwrap_or_default())),
-        "/telemetry/counters" => Some(json_response(serde_json::to_value(mnemos_telemetry::global().counters_snapshot()).unwrap_or_default())),
-        "/telemetry/events" => Some(json_response(serde_json::to_value(mnemos_telemetry::global().snapshot()).unwrap_or_default())),
-        "/telemetry/weights" => Some(json_response(serde_json::to_value(mnemos_telemetry::global().weights_history_snapshot()).unwrap_or_default())),
-        "/telemetry/system" => Some(json_response(serde_json::to_value(mnemos_telemetry::global().system_history_snapshot()).unwrap_or_default())),
-        _ if clean.starts_with("/telemetry") => Some(not_found()),
-        _ => None,
+        "/telemetry" => Some(json_response(tele.full_snapshot())),
+        "/telemetry/diagnose" => Some(json_response(serde_json::to_value(tele.diagnose(20)).unwrap_or_default())),
+        "/telemetry/counters" => Some(json_response(serde_json::to_value(tele.counters_snapshot()).unwrap_or_default())),
+        "/telemetry/events" => Some(json_response(serde_json::to_value(tele.snapshot()).unwrap_or_default())),
+        "/telemetry/weights" => Some(json_response(serde_json::to_value(tele.weights_history_snapshot()).unwrap_or_default())),
+        "/telemetry/system" => Some(json_response(serde_json::to_value(tele.system_history_snapshot()).unwrap_or_default())),
+        "/telemetry/files" => Some(json_response(serde_json::to_value(tele.telemetry_files()).unwrap_or_default())),
+        "/telemetry/file" => {
+            let date = query.get("date").map(String::as_str).unwrap_or("");
+            let limit = query
+                .get("limit")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(200);
+            let offset = query
+                .get("offset")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            let ok_only = query.get("ok").map(|s| s == "true" || s == "1");
+            match tele.read_file(date, limit, offset, ok_only) {
+                Some(events) => Some(json_response(
+                    serde_json::to_value(&events).unwrap_or_default(),
+                )),
+                None => Some(not_found()),
+            }
+        }
+        _ => Some(not_found()),
     }
 }
 
@@ -343,7 +413,7 @@ async fn handle_request(
         }
         return Ok(not_found());
     }
-    if let Some(resp) = handle_telemetry(req.uri().path(), req.method()) {
+    if let Some(resp) = handle_telemetry(req.uri(), req.method()) {
         return Ok(resp);
     }
     match route_for_path(req.uri().path()) {
