@@ -357,7 +357,7 @@ async fn try_daemon(command: &Command) -> Option<i32> {
         Command::Reward { score, attributions, recall_id } => {
             serde_json::json!({"command": "reward", "score": score, "attributions": attributions, "recall_id": recall_id})
         }
-        Command::Consolidate => serde_json::json!({"command": "consolidate"}),
+        Command::Consolidate => serde_json::json!({"command": "consolidate", "aggressive": true}),
         Command::Setup => {
             serde_json::json!({"command": "setup"})
         }
