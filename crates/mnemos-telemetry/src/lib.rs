@@ -552,7 +552,9 @@ impl Telemetry {
     }
 
     /// Delete one per-day file. Returns `true` if a file was removed.
-    /// Invalid dates always return `false`.
+    /// Invalid dates always return `false`. Also drops the cached open
+    /// handle for that date — otherwise further writes would go to the
+    /// unlinked inode and silently vanish.
     pub fn delete_file(&self, date: &str) -> bool {
         if !Self::valid_date(date) {
             return false;
@@ -560,7 +562,15 @@ impl Telemetry {
         let Some(dir) = &self.dir else {
             return false;
         };
-        std::fs::remove_file(dir.join(format!("{date}.jsonl"))).is_ok()
+        let removed = std::fs::remove_file(dir.join(format!("{date}.jsonl"))).is_ok();
+        if removed {
+            if let Ok(mut inner) = self.inner.lock() {
+                if inner.file.as_ref().is_some_and(|(d, _)| d == date) {
+                    inner.file = None;
+                }
+            }
+        }
+        removed
     }
 
     /// Full snapshot for `GET /telemetry` — everything a dashboard needs.
