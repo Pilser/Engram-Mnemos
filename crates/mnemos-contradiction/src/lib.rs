@@ -249,12 +249,34 @@ impl ContradictionDetector {
         }
         let candidate_count = candidate_pairs.len();
 
+        // Cost guard for 24/7 cycles: pairs grow ~N² with engrams per concept,
+        // and each verify is an LLM call. Verify at most the first
+        // `MAX_VERIFY_PAIRS_PER_SCAN` pairs per scan; the rest wait for the
+        // next cycle. Deferred, not dropped.
+        const MAX_VERIFY_PAIRS_PER_SCAN: usize = 10;
+        let deferred = candidate_pairs.len().saturating_sub(MAX_VERIFY_PAIRS_PER_SCAN);
+        candidate_pairs.truncate(MAX_VERIFY_PAIRS_PER_SCAN);
+
         // Step 2: LLM verification (accurate, few calls) + write-back.
+        // Per-pair failures are skipped (recorded) rather than aborting the
+        // whole scan, so one bad LLM reply can't kill a background cycle.
         let mut confirmed: Vec<(EngramId, EngramId)> = Vec::new();
         for (i, j) in candidate_pairs {
-            let verdict = self
+            let verdict = match self
                 .verify_pair(&rows[i].episode_raw, &rows[j].episode_raw)
-                .await?;
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    mnemos_telemetry::global().record(
+                        "mnemos-contradiction",
+                        "scan_concept.verify",
+                        false,
+                        &e.to_string(),
+                    );
+                    continue;
+                }
+            };
             if verdict.contradicts {
                 let a = rows[i].id;
                 let b = rows[j].id;
@@ -292,7 +314,7 @@ impl ContradictionDetector {
             "scan_concept",
             true,
             &format!(
-                "concept={concept_id} engrams={} candidates={candidate_count} confirmed={}",
+                "concept={concept_id} engrams={} candidates={candidate_count} confirmed={} deferred={deferred}",
                 rows.len(),
                 confirmed.len()
             ),

@@ -155,6 +155,15 @@ pub struct Cli {
     detector: Option<ContradictionDetector>,
     /// Optional mitosis splitter for aggressive consolidation.
     mitosis: Option<MitosisSplitter>,
+    /// Last-seen `source_count` per concept id. A concept whose count hasn't
+    /// grown since the previous aggressive cycle is skipped (no new engrams →
+    /// no new clusters, identities, or contradictions to find), so steady-state
+    /// 24/7 cycles cost ~zero LLM calls. Lives only while the daemon lives.
+    seen_source_counts: Mutex<std::collections::HashMap<u64, i64>>,
+    /// Concept ids already crystallized into identities this daemon lifetime.
+    /// Prevents duplicate `Identity` nodes when a concept stays overloaded
+    /// across cycles (its count keeps growing but it needs only one trait).
+    crystallized: Mutex<std::collections::HashSet<u64>>,
 }
 
 impl Cli {
@@ -176,6 +185,8 @@ impl Cli {
             storage,
             detector: None,
             mitosis: None,
+            seen_source_counts: Mutex::new(std::collections::HashMap::new()),
+            crystallized: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -438,10 +449,21 @@ impl Cli {
             return Ok(report);
         }
         // Aggressive extras: mitosis + identity + contradiction scan (all best-effort).
+        // Cost guard: concepts whose source_count hasn't grown since the last
+        // cycle are skipped — no new engrams means no new clusters, identities,
+        // or contradictions, so steady-state 24/7 cycles spend ~zero LLM calls.
         let candidates = self.fetch_mitosis_candidates(10).await.unwrap_or_default();
         let mut mitosis_children = 0u64;
         let mut identities_created = 0u64;
+        let mut skipped_unchanged = 0u64;
         for cand in &candidates {
+            {
+                let seen = self.seen_source_counts.lock().await;
+                if seen.get(&cand.id).copied().unwrap_or(-1) >= cand.source_count {
+                    skipped_unchanged += 1;
+                    continue;
+                }
+            }
             // Mitosis splitting if splitter attached.
             if let Some(splitter) = &self.mitosis {
                 match splitter
@@ -459,11 +481,14 @@ impl Cli {
                     }
                 }
             }
-            // Identity crystallization: create Identity for overloaded concept.
-            if let Ok(identity_id) = self.crystallize_identity(cand).await {
-                // Link concept -> identity if we created one.
-                let _ = self.link_defines(cand.id, identity_id).await;
-                identities_created += 1;
+            // Identity crystallization: once per concept per daemon lifetime
+            // (no duplicate traits when a concept stays overloaded).
+            if self.crystallized.lock().await.insert(cand.id) {
+                if let Ok(identity_id) = self.crystallize_identity(cand).await {
+                    // Link concept -> identity if we created one.
+                    let _ = self.link_defines(cand.id, identity_id).await;
+                    identities_created += 1;
+                }
             }
             // Contradiction scan if detector attached.
             if let Some(detector) = &self.detector {
@@ -481,16 +506,22 @@ impl Cli {
                     }
                 }
             }
+            // Remember this count so unchanged concepts skip LLM work next cycle.
+            self.seen_source_counts
+                .lock()
+                .await
+                .insert(cand.id, cand.source_count);
         }
         mnemos_telemetry::global().record(
             "mnemos-cli",
             "consolidate_aggressive",
             true,
             &format!(
-                "candidates={} mitosis_children={} identities={}",
+                "candidates={} mitosis_children={} identities={} skipped_unchanged={}",
                 candidates.len(),
                 mitosis_children,
-                identities_created
+                identities_created,
+                skipped_unchanged,
             ),
         );
         Ok(report)
