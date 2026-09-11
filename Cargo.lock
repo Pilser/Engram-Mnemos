@@ -2562,8 +2562,11 @@ dependencies = [
  "mnemos-mcp-tools",
  "mnemos-telemetry",
  "rmcp",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "tower",
 ]
 
@@ -3796,6 +3799,15 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ee86d63972a7c661d1536fefe8c3c8407321c3df668891286de28abcd087360"
+dependencies = [
+ "base64 0.13.1",
 ]
 
 [[package]]
