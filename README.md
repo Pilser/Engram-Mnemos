@@ -13,7 +13,7 @@ Engram Mnemos (MNEMOS) is a modular Rust workspace that gives an AI persistent, 
 cp .env.example .env  # then set OPENAI_API_KEY / ANTHROPIC_API_KEY etc.
 cargo run -p mnemos-app -- ingest "The Uganda ICT Hub is attracting VC"
 cargo run -p mnemos-app -- recall "infrastructure" --limit 5
-./target/release/engram serve  # persistent daemon: MCP + /telemetry on :4545 (:4546 HTTPS if TLS cert configured)
+./target/release/engram serve  # persistent daemon: MCP + /telemetry on :4545
 ```
 
 ## MCP endpoints
@@ -46,20 +46,5 @@ Local clients (Claude Desktop, Cursor, opencode, zeroclaw on the same machine) u
 ```
 
 Use `http://127.0.0.1:4545/mcp` for the 4 protocol tools, or `http://127.0.0.1:4545/mcp/cli` for the single `engram_cli` tool. If `MNEMOS_MCP_TOKEN` is set, add `"headers": {"Authorization": "Bearer <token>"}`.
-
-## HTTPS for remote clients
-
-Local `http://` is enough on the same machine. Remote/hosted clients that require `https://` need TLS: set `MNEMOS_TLS_CERT` + `MNEMOS_TLS_KEY` (PEM files) and the daemon also serves the **same router** on `https://<host>:4546/` (port via `MNEMOS_TLS_PORT`). Self-sign for testing:
-
-```sh
-mkdir -p tls && openssl req -x509 -newkey rsa:2048 -nodes \
-  -keyout tls/key.pem -out tls/cert.pem -days 365 -subj "/CN=localhost"
-# .env:
-MNEMOS_TLS_CERT=tls/cert.pem
-MNEMOS_TLS_KEY=tls/key.pem
-# MNEMOS_TLS_PORT=4546
-```
-
-Then point the client at `https://<host>:4546/mcp/tools` (accept the self-signed cert on first connect, or use a real CA cert in production).
 
 See `.env.example`, `PROJECT-PLAN.md`, and `docs/parallel-recall-risks.md`.

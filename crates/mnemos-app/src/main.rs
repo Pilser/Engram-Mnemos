@@ -76,8 +76,10 @@ pub enum Command {
     /// `serve` (`daemon`, `up`) — persistent daemon: HTTP (`/mcp*`, `/cli`,
     /// `/health`, `/telemetry*`) + background consolidation. Stays in terminal.
     Serve,
-    /// Explicit `help` / `--help` / `-h`.
+    /// Explicit `help` / `--help` / `-h` (agent: 5 commands only).
     Help,
+    /// `help-all` / `--help-all` (operator: all commands).
+    HelpAll,
     /// Anything unparseable; `message` is shown alongside the usage text.
     Invalid {
         message: String,
@@ -118,6 +120,7 @@ pub fn parse_args(argv: &[String]) -> Command {
         "mcp-tools" => Command::McpTools,
         "serve" | "daemon" | "up" => Command::Serve,
         "help" | "--help" | "-h" => Command::Help,
+        "help-all" | "--help-all" => Command::HelpAll,
         other => Command::Invalid {
             message: format!("unknown command {other:?}"),
         },
@@ -230,8 +233,20 @@ fn parse_setup(rest: &[&str]) -> Command {
     }
 }
 
-/// Usage text, printed for `Help` and [`Command::Invalid`].
+/// Agent-focused usage: the 5 memory commands (for `help`/`--help`/`-h` and invalid).
 fn usage() -> &'static str {
+    "usage: engram <command> [args]\n\
+     \n\
+     commands:\n\
+     \x20 ingest <text...>                    store one episodic memory\n\
+     \x20 recall <query...> [--limit N]       recall top-N memories as JSON (default 5)\n\
+     \x20 reward <score> [--recall-id N | attributions csv]  reward a recall (ledger id) or raw attributions\n\
+     \x20 consolidate                         run one consolidation cycle\n\
+     \x20 stats                               print memory stats as JSON"
+}
+
+/// Operator usage: all commands (for `--help-all` / `help-all`).
+fn usage_all() -> &'static str {
     "usage: engram <command> [args]\n\
      \n\
      commands:\n\
@@ -543,6 +558,10 @@ async fn run(argv: Vec<String>) -> i32 {
             println!("{}", usage());
             0
         }
+        Command::HelpAll => {
+            println!("{}", usage_all());
+            0
+        }
         Command::Invalid {
             message,
         } => {
@@ -735,7 +754,9 @@ async fn dispatch(command: Command) -> i32 {
                 1
             }
         },
-        Command::Help | Command::Invalid {
+        Command::Help
+        | Command::HelpAll
+        | Command::Invalid {
             ..
         } => {
             eprintln!("engram: error: unexpected command\n{}", usage());

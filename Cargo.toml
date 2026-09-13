@@ -82,9 +82,6 @@ rmcp = { version = "3.2", features = ["transport-io", "transport-streamable-http
 fastembed = { version = "6.0", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 hyper = { version = "1", default-features = false, features = ["server", "http1"] }
 tower = { version = "0.5", features = ["util"] }
-tokio-rustls = "0.26"
-rustls = "0.23"
-rustls-pemfile = "0.3"
 hdbscan = "0.12"
 dotenvy = "0.15"
 

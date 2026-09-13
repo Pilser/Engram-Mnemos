@@ -77,9 +77,6 @@ pub const HEALTH_PATH: &str = "/health";
 /// rule as everything else).
 pub const TOOLS_LIST_PATH: &str = "/tools";
 
-/// Default HTTPS port when `MNEMOS_TLS_PORT` is unset or unparsable.
-pub const DEFAULT_TLS_PORT: u16 = 4546;
-
 /// Which rmcp service a request path routes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceKey {
@@ -132,31 +129,6 @@ pub fn mcp_port_from_env() -> u16 {
     parse_port(std::env::var("MNEMOS_MCP_PORT").ok().as_deref())
 }
 
-/// HTTPS port from `MNEMOS_TLS_PORT` (default `4546`). Only used when
-/// `MNEMOS_TLS_CERT` + `MNEMOS_TLS_KEY` are both set.
-#[must_use]
-pub fn tls_port_from_env() -> u16 {
-    std::env::var("MNEMOS_TLS_PORT")
-        .ok()
-        .and_then(|s| s.trim().parse::<u16>().ok())
-        .unwrap_or(DEFAULT_TLS_PORT)
-}
-
-/// TLS cert/key paths from `MNEMOS_TLS_CERT` / `MNEMOS_TLS_KEY`.
-/// `None` unless BOTH are set and non-empty (TLS stays off otherwise).
-#[must_use]
-pub fn tls_paths_from_env() -> Option<(String, String)> {
-    let cert = std::env::var("MNEMOS_TLS_CERT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())?;
-    let key = std::env::var("MNEMOS_TLS_KEY")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())?;
-    Some((cert, key))
-}
-
 /// Static catalog of every tool on every surface (for `GET /tools`).
 #[must_use]
 pub fn tools_catalog() -> serde_json::Value {
@@ -185,42 +157,6 @@ pub fn tools_catalog() -> serde_json::Value {
 #[must_use]
 pub fn mcp_host_from_env() -> String {
     parse_host(std::env::var("MNEMOS_MCP_HOST").ok().as_deref())
-}
-
-/// Build a TLS acceptor from `MNEMOS_TLS_CERT`/`MNEMOS_TLS_KEY` (PEM files).
-/// Returns `None` when not configured (plain HTTP only). Errors name the
-/// exact problem (missing file, bad PEM, no certificate, no private key).
-fn load_tls_acceptor() -> Result<Option<tokio_rustls::TlsAcceptor>, String> {
-    let Some((cert_path, key_path)) = tls_paths_from_env() else {
-        return Ok(None);
-    };
-    let cert_data =
-        std::fs::read(&cert_path).map_err(|e| format!("read TLS cert {cert_path}: {e}"))?;
-    let key_data =
-        std::fs::read(&key_path).map_err(|e| format!("read TLS key {key_path}: {e}"))?;
-    let mut cert_reader = std::io::BufReader::new(&cert_data[..]);
-    let certs: Vec<rustls::pki_types::CertificateDer> =
-        rustls_pemfile::certs(&mut cert_reader)
-            .filter_map(std::result::Result::ok)
-            .collect();
-    if certs.is_empty() {
-        return Err(format!("no PEM certificates in {cert_path}"));
-    }
-    let mut key_reader = std::io::BufReader::new(&key_data[..]);
-    let key = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|e| format!("parse TLS key {key_path}: {e}"))?
-        .ok_or_else(|| format!("no PEM private key in {key_path}"))?;
-    let config = rustls::ServerConfig::builder_with_provider(
-        rustls::crypto::aws_lc_rs::default_provider().into(),
-    )
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(|e| format!("TLS13 unavailable: {e}"))?
-    .with_no_client_auth()
-    .with_single_cert(certs, key)
-    .map_err(|e| format!("TLS cert/key mismatch: {e}"))?;
-    Ok(Some(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
-        config,
-    ))))
 }
 
 /// Bearer token from `MNEMOS_MCP_TOKEN` (default: open access).
@@ -611,16 +547,11 @@ impl<T: tokio::io::AsyncWrite + Unpin> hyper::rt::Write for TokioIo<T> {
 ///
 /// [`ProtocolTools`]: mnemos_mcp_protocol::ProtocolTools
 ///
-/// When `MNEMOS_TLS_CERT` + `MNEMOS_TLS_KEY` are set, a second listener
-/// serves the SAME router over HTTPS on `MNEMOS_TLS_PORT` (default `4546`)
-/// for clients that only speak `https://`.
-///
 /// # Errors
 ///
 /// Returns [`mnemos_core::MnemosError::Http`] if a bind address is invalid,
-/// a listener fails to bind, TLS material fails to load, or accepting
-/// connections fails. Failures are also recorded via telemetry
-/// (`mnemos-mcp-http` / `serve`).
+/// a listener fails to bind, or accepting connections fails. Failures are
+/// also recorded via telemetry (`mnemos-mcp-http` / `serve`).
 pub async fn serve(protocol: ProtocolTools, cli: Arc<Cli>) -> mnemos_core::Result<()> {
     let host = mcp_host_from_env();
     let port = mcp_port_from_env();
@@ -645,58 +576,6 @@ pub async fn serve(protocol: ProtocolTools, cli: Arc<Cli>) -> mnemos_core::Resul
         eprintln!("mnemos-mcp-http auth: bearer token required for /mcp/* (MNEMOS_MCP_TOKEN set)");
     }
     let services = build_services(protocol, Arc::clone(&cli));
-
-    // Optional HTTPS listener (same router, TLS 1.3). Spawned alongside plain
-    // HTTP so local `http://` clients keep working unchanged.
-    if let Some(acceptor) = load_tls_acceptor().map_err(|e| {
-        let failure = mnemos_core::MnemosError::Http(e);
-        record_serve_error(&failure.to_string());
-        failure
-    })? {
-        let tls_port = tls_port_from_env();
-        let tls_addr: SocketAddr =
-            format!("{host}:{tls_port}").parse().map_err(|err| {
-                let failure = mnemos_core::MnemosError::Http(format!(
-                    "invalid TLS bind addr {host}:{tls_port}: {err}"
-                ));
-                record_serve_error(&failure.to_string());
-                failure
-            })?;
-        let tls_listener = tokio::net::TcpListener::bind(tls_addr).await.map_err(|err| {
-            let failure = mnemos_core::MnemosError::Http(format!("bind {tls_addr}: {err}"));
-            record_serve_error(&failure.to_string());
-            failure
-        })?;
-        eprintln!("mnemos-mcp-http listening on https://{tls_addr}/mcp* (TLS, same router)");
-        let tls_services = services.clone();
-        let tls_token = token.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, peer)) = tls_listener.accept().await else {
-                    continue;
-                };
-                let tls_services = tls_services.clone();
-                let tls_token = tls_token.clone();
-                let acceptor = acceptor.clone();
-                tokio::spawn(async move {
-                    let tls_stream = match acceptor.accept(stream).await {
-                        Ok(s) => s,
-                        Err(err) => {
-                            eprintln!("mnemos-mcp-http TLS handshake from {peer} failed: {err}");
-                            return;
-                        }
-                    };
-                    serve_stream(
-                        TokioIo::new(tls_stream),
-                        &tls_services,
-                        tls_token,
-                        &format!("{peer} (tls)"),
-                    )
-                    .await;
-                });
-            }
-        });
-    }
 
     loop {
         let (stream, peer) = listener.accept().await.map_err(|err| {
@@ -757,7 +636,7 @@ fn build_services(protocol: ProtocolTools, cli: Arc<Cli>) -> Services {
     }
 }
 
-/// Serve one accepted connection (plain or TLS-wrapped) through the router.
+/// Serve one accepted connection through the router.
 async fn serve_stream<S>(
     io: TokioIo<S>,
     services: &Services,
