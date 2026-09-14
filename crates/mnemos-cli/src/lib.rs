@@ -394,15 +394,6 @@ impl Cli {
                 ));
             }
         }
-        // Ledger is on by default — every recall notes that rewarding is available.
-        let recall_id = self.retrieval.lock().await.last_recall_id();
-        if let Some(id) = recall_id {
-            out.push_str(&format!(
-                "\n[Note: consider rewarding this recall via recall_id={id} with the reward tool]\n"
-            ));
-        } else {
-            out.push_str("\n[Note: consider rewarding this recall with the reward tool]\n");
-        }
         Ok(out)
     }
 

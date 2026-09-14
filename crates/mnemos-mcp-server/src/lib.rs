@@ -202,8 +202,8 @@ fn topic_help(topic: &str) -> Option<String> {
         ),
         "reward" => Some(
             [
-                "reward: apply a scalar reward signal with per-engram attributions.",
-                "params: attributions (array of numbers, required), score (number, required).",
+                "reward: apply a scalar reward signal with per-engram attributions. Must reward each recall (score -1.0 to 1.0: 1.0 positive, -1.0 negative, 0 no-op).",
+                "params: attributions (array of numbers, required), score (number -1.0 to 1.0, required).",
                 "example: {\"command\":\"reward\",\"attributions\":[0.5,0.5],\"score\":1.0}",
             ]
             .join("\n"),
