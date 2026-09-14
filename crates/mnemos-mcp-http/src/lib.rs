@@ -140,15 +140,15 @@ pub fn tools_catalog() -> serde_json::Value {
             {"name": "consolidate", "params": "aggressive?=false"}
         ]},
         {"endpoint": "/mcp/tools", "transport": "mcp-streamable-http", "tools": [
-            {"name": "engram_ingest", "params": "text*"},
-            {"name": "engram_recall", "params": "query*, limit?=10"},
+            {"name": "engram_ingest", "params": "text*, prev_id?, seq_pos? (sequential TemporalSequence)"},
+            {"name": "engram_recall", "params": "query*, limit?=10, follow_seq?, seq_depth?, seq_dir? (sequential walk)"},
             {"name": "engram_reward", "params": "attributions?, score*, recall_id?"},
             {"name": "engram_consolidate", "params": "none"},
             {"name": "engram_stats", "params": "none"},
             {"name": "help", "params": "tool?"}
         ]},
         {"endpoint": "/mcp/cli", "transport": "mcp-streamable-http", "tools": [
-            {"name": "engram_cli", "params": "command*, text?, query?, limit?, attributions?, score?, recall_id?, args? (commands: help, ingest, recall, reward, consolidate, stats)"}
+            {"name": "engram_cli", "params": "command*, text?, query?, limit?, prev_id?, seq_pos?, follow_seq?, seq_depth?, seq_dir?, attributions?, score?, recall_id?, args? (commands: help, ingest, recall, reward, consolidate, stats)"}
         ]}
     ])
 }
@@ -372,18 +372,37 @@ async fn dispatch_cli_rpc(cli: &Arc<Cli>, body: &[u8]) -> hyper::Response<HttpBo
     let command = req.get("command").and_then(|v| v.as_str()).unwrap_or("");
     let out: Result<serde_json::Value, String> = match command {
         "ingest" => match req.get("text").and_then(|v| v.as_str()) {
-            Some(text) => cli.ingest(text).await.map(|id| serde_json::json!({"engram_id": id})).map_err(|e| e.to_string()),
+            Some(text) => {
+                let prev_id = req.get("prev_id").and_then(serde_json::Value::as_u64);
+                let seq_pos = req.get("seq_pos").and_then(serde_json::Value::as_i64);
+                let res = if let Some(pid) = prev_id {
+                    cli.ingest_sequential(text, Some(pid), seq_pos).await
+                } else {
+                    cli.ingest(text).await
+                };
+                res.map(|id| serde_json::json!({"engram_id": id})).map_err(|e| e.to_string())
+            }
             None => Err("ingest needs {text}".to_string()),
         },
         "recall" => {
-            let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let limit = req.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(5) as usize;
-            match cli.recall(query, limit).await {
-                Ok(results) => {
-                    let recall_id = cli.last_recall_id().await;
-                    serde_json::to_value(&serde_json::json!({"results": results, "recall_id": recall_id})).map_err(|e| e.to_string())
+            // Follow sequential chain if follow_seq present
+            if let Some(sid) = req.get("follow_seq").and_then(serde_json::Value::as_u64) {
+                let depth = req.get("depth").or_else(|| req.get("seq_depth")).and_then(serde_json::Value::as_u64).unwrap_or(10) as usize;
+                let dir = req.get("dir").or_else(|| req.get("seq_dir")).and_then(|v| v.as_str()).unwrap_or("down");
+                match cli.follow_sequence(sid, depth, dir).await {
+                    Ok(chain) => serde_json::to_value(&serde_json::json!({"sequential_chain": chain, "start_id": sid, "depth": depth, "dir": dir})).map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
                 }
-                Err(e) => Err(e.to_string()),
+            } else {
+                let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let limit = req.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(5) as usize;
+                match cli.recall(query, limit).await {
+                    Ok(results) => {
+                        let recall_id = cli.last_recall_id().await;
+                        serde_json::to_value(&serde_json::json!({"results": results, "recall_id": recall_id})).map_err(|e| e.to_string())
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
             }
         }
         "reward" => {

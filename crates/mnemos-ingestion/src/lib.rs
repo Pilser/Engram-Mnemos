@@ -144,6 +144,58 @@ impl IngestionPipeline {
         outcome
     }
 
+    /// Ingest one memory as part of a sequential/story chain.
+    ///
+    /// When `prev_id` is `Some`, a `TemporalSequence` edge `prev → new` is
+    /// created after the engram node. `seq_pos` (optional) is stored as edge
+    /// property `"pos"` so many engrams can share the same position number
+    /// before the next position goes down (fan-out at a level). Returns the
+    /// new engram id for chaining (`id1 = ingest_sequential(ch1, None)` →
+    /// `id2 = ingest_sequential(ch2, Some(id1))` …).
+    ///
+    /// No-`prev` path is identical to `ingest_with_importance`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MnemosError`] when any ML provider fails, storage fails, or
+    /// the `TemporalSequence` edge write fails.
+    pub async fn ingest_sequential(
+        &self,
+        text: &str,
+        engram_type: EngramType,
+        importance: Option<f64>,
+        prev_id: Option<EngramId>,
+        seq_pos: Option<i64>,
+    ) -> mnemos_core::Result<EngramId> {
+        let new_id = self.ingest_inner(text, engram_type, importance).await?;
+        if let Some(prev) = prev_id {
+            let req = match seq_pos {
+                Some(pos) => connect_temporal_sequence_edge_with_pos(
+                    to_i64(prev)?,
+                    to_i64(new_id)?,
+                    pos,
+                )
+                .map_err(storage_error)?,
+                None => connect_temporal_sequence_edge(to_i64(prev)?, to_i64(new_id)?)
+                    .map_err(storage_error)?,
+            };
+            let _: serde_json::Value = self
+                .storage
+                .client()
+                .query(req)
+                .send()
+                .await
+                .map_err(storage_error)?;
+        }
+        mnemos_telemetry::global().record(
+            "mnemos-ingestion",
+            "ingest_sequential",
+            true,
+            &format!("engram_id={new_id} prev={prev_id:?} pos={seq_pos:?}"),
+        );
+        Ok(new_id)
+    }
+
     /// The ingest workhorse shared by [`Self::ingest`] and
     /// [`Self::ingest_with_importance`] (telemetry wraps at that layer).
     ///
@@ -444,6 +496,48 @@ fn connect_abstracts_to_edge(from_id: i64, to_id: i64) {
                 "AbstractsTo",
                 NodeRef::param("to_id"),
                 Vec::<(String, PropertyInput)>::new(),
+            ),
+        )
+        .returning(["edge"])
+}
+
+/// Create a `TemporalSequence` edge between two engrams (earlier → later).
+///
+/// This is the sequential/story chain. Edges are property-less today;
+/// `pos` grouping is tracked via caller-side `seq_pos` if needed (see
+/// `connect_temporal_sequence_edge_with_pos`). The label is queried by
+/// `StimulationEngine::neighbors` / `recall_stimulated` wave (`temporal_seq`
+/// weight `0.30`).
+#[query]
+fn connect_temporal_sequence_edge(from_id: i64, to_id: i64) {
+    let _ = (&from_id, &to_id);
+    write_batch()
+        .var_as(
+            "edge",
+            g().n(NodeRef::param("from_id")).add_e(
+                "TemporalSequence",
+                NodeRef::param("to_id"),
+                Vec::<(String, PropertyInput)>::new(),
+            ),
+        )
+        .returning(["edge"])
+}
+
+/// Create a `TemporalSequence` edge with an explicit position number.
+///
+/// `pos` allows many engrams to share the same logical position before the
+/// next position goes down (fan-out at a level). Stored as edge property
+/// `"pos"`.
+#[query]
+fn connect_temporal_sequence_edge_with_pos(from_id: i64, to_id: i64, pos: i64) {
+    let _ = (&from_id, &to_id, &pos);
+    write_batch()
+        .var_as(
+            "edge",
+            g().n(NodeRef::param("from_id")).add_e(
+                "TemporalSequence",
+                NodeRef::param("to_id"),
+                vec![("pos".to_string(), pos)],
             ),
         )
         .returning(["edge"])

@@ -66,6 +66,21 @@ struct MnemosCliParams {
     /// Optional `help` topic, e.g. `["recall"]` (`help`).
     #[serde(default)]
     args: Option<Vec<String>>,
+    /// Previous engram id for sequential ingest (`ingest` with `--seq`).
+    #[serde(default)]
+    prev_id: Option<u64>,
+    /// Position number for sequential edge (`ingest` with `--seq-pos`).
+    #[serde(default)]
+    seq_pos: Option<i64>,
+    /// Follow sequential chain from this engram id (`recall` with `--follow-seq`).
+    #[serde(default)]
+    follow_seq: Option<u64>,
+    /// Depth for follow-seq walk (`recall`).
+    #[serde(default)]
+    seq_depth: Option<usize>,
+    /// Direction for follow-seq walk: up|down|both (`recall`).
+    #[serde(default)]
+    seq_dir: Option<String>,
 }
 
 /// Parsed `command` values.
@@ -168,15 +183,16 @@ fn topic_help(topic: &str) -> Option<String> {
         "ingest" => Some(
             [
                 "ingest: store one text episode into memory.",
-                "params: text (string, required).",
+                "params: text (string, required), prev_id (u64, optional, for TemporalSequence), seq_pos (i64, optional, position number).",
                 "example: {\"command\":\"ingest\",\"text\":\"the sky is blue\"}",
+                "sequential example: {\"command\":\"ingest\",\"text\":\"ch2\",\"prev_id\":123,\"seq_pos\":1}",
             ]
             .join("\n"),
         ),
         "recall" => Some(
             [
                 "recall: search memory by resonance with a natural-language query.",
-                "params: query (string, required), limit (integer, optional, default 5).",
+                "params: query (string, required), limit (integer, optional, default 5), follow_seq (u64, optional, walk sequential chain), seq_depth (integer, optional, default 10), seq_dir (string, optional, up|down|both, default down).",
                 "example: {\"command\":\"recall\",\"query\":\"blue sky\",\"limit\":5}",
             ]
             .join("\n"),
@@ -260,11 +276,11 @@ impl MnemosServer {
     /// - `{"command":"help","args":["<command>"]}` → per-command usage
     ///   (params, types, example JSON) — like `--help` per command.
     ///
-    /// Commands: ingest, recall, reward, consolidate, stats.
+    /// Commands: ingest (with optional prev_id/seq_pos for TemporalSequence), recall (with optional follow_seq), reward, consolidate, stats.
     /// Shell parity: same commands exist as `mnemos <command>` on the shell.
     #[tool(
         name = "engram_cli",
-        description = "Single entry point for the MNEMOS memory CLI. Call {\"command\":\"help\"} for the command list, or {\"command\":\"help\",\"args\":[\"<command>\"]} for per-command usage (params, types, example JSON — like --help per command). Commands: ingest, recall, reward, consolidate, stats. Shell parity: same commands exist as `mnemos <command>` on the shell."
+        description = "Single entry point for the MNEMOS memory CLI. Call {\"command\":\"help\"} for the command list, or {\"command\":\"help\",\"args\":[\"<command>\"]} for per-command usage (params, types, example JSON — like --help per command). Commands: ingest (prev_id?, seq_pos? for sequential), recall (follow_seq?, seq_depth?, seq_dir? for sequential walk), reward, consolidate, stats. Shell parity: same commands exist as `mnemos <command>` on the shell."
     )]
     async fn engram_cli(
         &self,
@@ -281,17 +297,32 @@ impl MnemosServer {
                 serde_json::json!({ "help": text })
             }
             Command::Ingest => {
-                let id = self
-                    .cli
-                    .ingest(ingest_text(&params)?)
-                    .await
-                    .map_err(internal)?;
+                let text = ingest_text(&params)?;
+                let id = if let Some(pid) = params.prev_id {
+                    self.cli
+                        .ingest_sequential(text, Some(pid), params.seq_pos)
+                        .await
+                        .map_err(internal)?
+                } else {
+                    self.cli.ingest(text).await.map_err(internal)?
+                };
                 serde_json::json!({ "engram_id": id })
             }
             Command::Recall => {
-                let (query, limit) = recall_args(&params)?;
-                let results = self.cli.recall(query, limit).await.map_err(internal)?;
-                serde_json::json!({ "results": results })
+                if let Some(sid) = params.follow_seq {
+                    let depth = params.seq_depth.unwrap_or(10);
+                    let dir = params.seq_dir.as_deref().unwrap_or("down");
+                    let chain = self
+                        .cli
+                        .follow_sequence(sid, depth, dir)
+                        .await
+                        .map_err(internal)?;
+                    serde_json::json!({ "sequential_chain": chain, "start_id": sid, "depth": depth, "dir": dir })
+                } else {
+                    let (query, limit) = recall_args(&params)?;
+                    let results = self.cli.recall(query, limit).await.map_err(internal)?;
+                    serde_json::json!({ "results": results })
+                }
             }
             Command::Reward => {
                 let (attributions, score) = reward_args(&params)?;

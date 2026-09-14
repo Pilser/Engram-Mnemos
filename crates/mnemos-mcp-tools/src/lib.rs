@@ -59,6 +59,12 @@ fn to_json_string(payload: impl Serialize) -> Result<String, ErrorData> {
 pub struct IngestParams {
     /// Raw episode text to ingest into memory.
     pub text: String,
+    /// Previous engram id for sequential chain (`TemporalSequence`).
+    #[serde(default)]
+    pub prev_id: Option<u64>,
+    /// Position number for sequential edge (`pos` property, fan-out at same level).
+    #[serde(default)]
+    pub seq_pos: Option<i64>,
 }
 
 /// Params for `engram_recall`.
@@ -69,6 +75,15 @@ pub struct RecallParams {
     /// Max results; defaults to [`DEFAULT_RECALL_LIMIT`] when omitted.
     #[serde(default = "default_recall_limit")]
     pub limit: usize,
+    /// Follow sequential chain from this engram id (`TemporalSequence` walk).
+    #[serde(default)]
+    pub follow_seq: Option<u64>,
+    /// Depth for follow-seq walk (default 10).
+    #[serde(default)]
+    pub seq_depth: Option<usize>,
+    /// Direction for follow-seq walk: up|down|both (default down).
+    #[serde(default)]
+    pub seq_dir: Option<String>,
 }
 
 impl RecallParams {
@@ -135,29 +150,45 @@ impl MnemosMcpTools {
     /// Ingest a text episode; returns `{ "engram_id": … }`.
     #[tool(
         name = "engram_ingest",
-        description = "Ingest a text episode into memory. Returns the new engram id as JSON. Call help with tool=\"engram_ingest\" for full usage."
+        description = "Ingest a text episode into memory. Optional prev_id/seq_pos for sequential chain (TemporalSequence). Returns the new engram id as JSON. Call help with tool=\"engram_ingest\" for full usage."
     )]
     pub async fn ingest(
         &self,
         Parameters(params): Parameters<IngestParams>,
     ) -> Result<String, ErrorData> {
-        let id = self
-            .cli
-            .ingest(&params.text)
-            .await
-            .map_err(internal_error)?;
+        let id = if let Some(pid) = params.prev_id {
+            self.cli
+                .ingest_sequential(&params.text, Some(pid), params.seq_pos)
+                .await
+                .map_err(internal_error)?
+        } else {
+            self.cli
+                .ingest(&params.text)
+                .await
+                .map_err(internal_error)?
+        };
         to_json_string(serde_json::json!({ "engram_id": id }))
     }
 
     /// Recall resonant engrams; returns `{ "results": […], "recall_id": … }`.
     #[tool(
         name = "engram_recall",
-        description = "Recall engrams resonating with a query. Optional limit defaults to 10. Returns results as JSON. Call help with tool=\"engram_recall\" for full usage."
+        description = "Recall engrams resonating with a query. Optional limit defaults to 10. Optional follow_seq/seq_depth/seq_dir to walk sequential chain (TemporalSequence). Returns results as JSON. Call help with tool=\"engram_recall\" for full usage."
     )]
     pub async fn recall(
         &self,
         Parameters(params): Parameters<RecallParams>,
     ) -> Result<String, ErrorData> {
+        if let Some(sid) = params.follow_seq {
+            let depth = params.seq_depth.unwrap_or(10);
+            let dir = params.seq_dir.as_deref().unwrap_or("down");
+            let chain = self
+                .cli
+                .follow_sequence(sid, depth, dir)
+                .await
+                .map_err(internal_error)?;
+            return to_json_string(serde_json::json!({ "sequential_chain": chain, "start_id": sid, "depth": depth, "dir": dir }));
+        }
         let results = self
             .cli
             .recall(&params.query, params.effective_limit())
@@ -256,20 +287,27 @@ fn tool_list() -> String {
 /// Full usage for `engram_ingest`.
 fn help_ingest() -> String {
     "engram_ingest: Ingest a text episode into memory.\n\
-     Params:\n\
-       text (string, required): Raw episode text to ingest.\n\
-     Example: {\"text\": \"the sky is blue\"}\n\
-     Returns: {\"engram_id\": 42}".to_string()
+      Params:\n\
+        text (string, required): Raw episode text to ingest.\n\
+        prev_id (integer, optional): Previous engram id for sequential chain (TemporalSequence).\n\
+        seq_pos (integer, optional): Position number for sequential edge (fan-out at same level).\n\
+      Example: {\"text\": \"the sky is blue\"}\n\
+      Sequential example: {\"text\": \"ch2\", \"prev_id\": 123, \"seq_pos\": 1}\n\
+      Returns: {\"engram_id\": 42}".to_string()
 }
 
 /// Full usage for `engram_recall`.
 fn help_recall() -> String {
     "engram_recall: Recall engrams resonating with a query.\n\
-     Params:\n\
-       query (string, required): Natural-language query to resonate against.\n\
-       limit (integer, optional, default 10): Max results to return.\n\
-     Example: {\"query\": \"blue sky\", \"limit\": 5}\n\
-     Returns: {\"results\": [...]}".to_string()
+      Params:\n\
+        query (string, required): Natural-language query to resonate against.\n\
+        limit (integer, optional, default 10): Max results to return.\n\
+        follow_seq (integer, optional): Follow sequential chain from this engram id (TemporalSequence).\n\
+        seq_depth (integer, optional, default 10): Depth for follow-seq walk.\n\
+        seq_dir (string, optional, default down): Direction for follow-seq walk: up|down|both.\n\
+      Example: {\"query\": \"blue sky\", \"limit\": 5}\n\
+      Sequential walk: {\"follow_seq\": 123, \"seq_depth\": 5, \"seq_dir\": \"down\", \"query\": \"\"}\n\
+      Returns: {\"results\": [...]} or {\"sequential_chain\": [...]}".to_string()
 }
 
 /// Full usage for `engram_reward`.

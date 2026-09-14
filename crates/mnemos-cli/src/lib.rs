@@ -217,6 +217,48 @@ impl Cli {
         self.ingestion.ingest(text, EngramType::Episodic).await
     }
 
+    /// Ingest one memory as part of a sequential chain (`TemporalSequence`).
+    ///
+    /// `prev_id` links `prev → new` when `Some`; `seq_pos` (optional) is stored
+    /// as edge property `"pos"` allowing fan-out at same logical position.
+    /// Returns the new engram id for chaining.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MnemosError`] when any ML provider fails or HelixDB fails.
+    pub async fn ingest_sequential(
+        &self,
+        text: &str,
+        prev_id: Option<EngramId>,
+        seq_pos: Option<i64>,
+    ) -> Result<EngramId> {
+        self.ingestion
+            .ingest_sequential(text, EngramType::Episodic, None, prev_id, seq_pos)
+            .await
+    }
+
+    /// Sequential info for one engram (best-effort, via retrieval pipeline).
+    pub async fn sequence_info(
+        &self,
+        engram_id: EngramId,
+    ) -> Option<mnemos_retrieval::SequenceInfo> {
+        self.retrieval.lock().await.sequence_info(engram_id).await
+    }
+
+    /// Follow a sequential chain (`TemporalSequence`) from `start_id`.
+    pub async fn follow_sequence(
+        &self,
+        start_id: EngramId,
+        depth: usize,
+        dir: &str,
+    ) -> Result<Vec<EngramId>> {
+        self.retrieval
+            .lock()
+            .await
+            .follow_sequence(start_id, depth, dir)
+            .await
+    }
+
     /// Ingest one memory with an explicit type and optional importance
     /// override (protocol `store` path).
     ///
@@ -333,6 +375,24 @@ impl Cli {
                 "[Memory: {} (relevance: {:.2})]\n{} [importance: {:.2}]\n",
                 snippet, r.resonance_score, r.episode_raw, r.importance_score
             ));
+            // Sequential annotation (best-effort, no error)
+            if let Some(seq) = self.sequence_info(r.engram_id).await {
+                out.push_str(&format!(
+                    "[sequential: pos={} head={} prev={} next={}]\n",
+                    seq.position,
+                    seq.head_id.map_or("-".to_string(), |id| id.to_string()),
+                    seq.prev_id.map_or("-".to_string(), |id| id.to_string()),
+                    if seq.next_ids.is_empty() {
+                        "-".to_string()
+                    } else {
+                        seq.next_ids
+                            .iter()
+                            .map(|id| id.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    }
+                ));
+            }
         }
         // Ledger is on by default — every recall notes that rewarding is available.
         let recall_id = self.retrieval.lock().await.last_recall_id();

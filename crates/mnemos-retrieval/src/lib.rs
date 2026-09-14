@@ -177,6 +177,34 @@ fn engram_identity_traits(engram_id: i64) {
         .returning(["traits"])
 }
 
+/// Fetch direct `TemporalSequence` successors of an engram.
+#[query]
+fn get_temporal_next(engram_id: i64) {
+    let _ = &engram_id;
+    read_batch()
+        .var_as(
+            "next",
+            g().n(NodeRef::param("engram_id"))
+                .out(Some("TemporalSequence"))
+                .id(),
+        )
+        .returning(["next"])
+}
+
+/// Fetch direct `TemporalSequence` predecessors of an engram.
+#[query]
+fn get_temporal_prev(engram_id: i64) {
+    let _ = &engram_id;
+    read_batch()
+        .var_as(
+            "prev",
+            g().n(NodeRef::param("engram_id"))
+                .in_(Some("TemporalSequence"))
+                .id(),
+        )
+        .returning(["prev"])
+}
+
 /// Five-factor CRR scoring over vector-search candidates.
 ///
 /// * `semantic_sims[i]` should be `1.0 - candidates[i].distance`; a missing
@@ -328,6 +356,76 @@ fn alignment_from_traits_response(response: &serde_json::Value) -> f64 {
 /// A JSON number (`f64` or integer) as `f64`; `None` otherwise.
 fn number_as_f64(v: &serde_json::Value) -> Option<f64> {
     v.as_f64()
+}
+
+/// Sequential chain info for an engram (when part of a `TemporalSequence`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SequenceInfo {
+    /// Whether this engram participates in a sequential chain.
+    pub sequential: bool,
+    /// Position from sequence head (head = 0, next = 1 …).
+    pub position: u64,
+    /// Head engram id of the chain.
+    pub head_id: Option<EngramId>,
+    /// Direct predecessor, if any.
+    pub prev_id: Option<EngramId>,
+    /// Direct successors (fan-out at same logical position allowed).
+    pub next_ids: Vec<EngramId>,
+}
+
+fn parse_temporal_ids(response: &serde_json::Value, key: &str) -> Vec<EngramId> {
+    let Some(val) = response.get(key) else {
+        return Vec::new();
+    };
+    match val {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|v| {
+                if let Some(n) = v.as_u64() {
+                    return Some(n);
+                }
+                if let Some(n) = v.as_i64().and_then(|i| u64::try_from(i).ok()) {
+                    return Some(n);
+                }
+                if let Some(o) = v.as_object() {
+                    if let Some(id) = o.get("$id").or_else(|| o.get("id")) {
+                        if let Some(n) = id.as_u64() {
+                            return Some(n);
+                        }
+                        if let Some(n) = id.as_i64().and_then(|i| u64::try_from(i).ok()) {
+                            return Some(n);
+                        }
+                        if let Some(s) = id.as_str().and_then(|s| s.parse::<u64>().ok()) {
+                            return Some(s);
+                        }
+                    }
+                }
+                if let Some(s) = v.as_str().and_then(|s| s.parse::<u64>().ok()) {
+                    return Some(s);
+                }
+                None
+            })
+            .collect(),
+        serde_json::Value::Object(map) => map
+            .get("$id")
+            .or_else(|| map.get("id"))
+            .and_then(|id| {
+                if let Some(n) = id.as_u64() {
+                    Some(vec![n])
+                } else if let Some(n) = id.as_i64().and_then(|i| u64::try_from(i).ok()) {
+                    Some(vec![n])
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default(),
+        v if v.is_u64() || v.is_i64() => v
+            .as_u64()
+            .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
+            .map(|n| vec![n])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 /// Single-pass CRR recall pipeline with reward-driven edge-weight learning.
@@ -783,6 +881,101 @@ impl RetrievalPipeline {
         } else {
             self.ledger.keys().next().copied()
         }
+    }
+
+    /// Sequential info for one engram (best-effort). Walks `TemporalSequence`
+    /// backwards to head to compute `position`. No error — returns `None` if
+    /// the engram is not sequential.
+    pub async fn sequence_info(&self, engram_id: EngramId) -> Option<SequenceInfo> {
+        let prev_ids = self.temporal_ids(engram_id, true).await;
+        let next_ids = self.temporal_ids(engram_id, false).await;
+        let prev = prev_ids.first().copied();
+        let sequential = prev.is_some() || !next_ids.is_empty();
+        if !sequential {
+            return None;
+        }
+        // Walk to head to compute position (hops from head)
+        let mut head = engram_id;
+        let mut pos = 0u64;
+        let mut cur = engram_id;
+        for _ in 0..1024 {
+            let p = self.temporal_ids(cur, true).await;
+            if let Some(pid) = p.first().copied() {
+                head = pid;
+                pos += 1;
+                cur = pid;
+            } else {
+                break;
+            }
+        }
+        Some(SequenceInfo {
+            sequential: true,
+            position: pos,
+            head_id: Some(head),
+            prev_id: prev,
+            next_ids,
+        })
+    }
+
+    /// Follow a sequential chain from `start_id` for `depth` steps in `dir`
+    /// (`"up"`/`"down"`/`"both"`). Returns ordered ids.
+    pub async fn follow_sequence(
+        &self,
+        start_id: EngramId,
+        depth: usize,
+        dir: &str,
+    ) -> Result<Vec<EngramId>> {
+        let mut out = Vec::new();
+        if dir == "up" || dir == "both" {
+            let mut cur = start_id;
+            for _ in 0..depth {
+                let p = self.temporal_ids(cur, true).await;
+                if let Some(pid) = p.first().copied() {
+                    out.push(pid);
+                    cur = pid;
+                } else {
+                    break;
+                }
+            }
+            out.reverse();
+        }
+        if dir == "down" || dir == "both" {
+            if dir == "both" {
+                out.push(start_id);
+            }
+            let mut cur = start_id;
+            for _ in 0..depth {
+                let next = self.temporal_ids(cur, false).await;
+                if let Some(nid) = next.first().copied() {
+                    out.push(nid);
+                    cur = nid;
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn temporal_ids(&self, engram_id: EngramId, prev: bool) -> Vec<EngramId> {
+        let node_param = i64::try_from(engram_id).unwrap_or(i64::MAX);
+        let req = if prev {
+            match get_temporal_prev(node_param) {
+                Ok(r) => r,
+                Err(_) => return Vec::new(),
+            }
+        } else {
+            match get_temporal_next(node_param) {
+                Ok(r) => r,
+                Err(_) => return Vec::new(),
+            }
+        };
+        let resp: serde_json::Value = match self.storage.client().query(req).send().await {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        let key = if prev { "prev" } else { "next" };
+        parse_temporal_ids(&resp, key)
     }
 
     /// Read-modify-write `activation_count + 1`. All failures are swallowed

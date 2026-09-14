@@ -49,13 +49,19 @@ pub const DEFAULT_RECALL_LIMIT: usize = 5;
 #[derive(Debug, PartialEq)]
 pub enum Command {
     /// `ingest <text...>` — store one episodic memory.
+    /// `--seq <prev_id> [--seq-pos N]` chains via `TemporalSequence`.
     Ingest {
         text: String,
+        prev_id: Option<u64>,
+        seq_pos: Option<i64>,
     },
-    /// `recall <query...> [--limit N]` — recall top-`limit` memories.
+    /// `recall <query...> [--limit N] [--follow-seq <id> --depth N --dir up|down|both]` — recall top-`limit` memories.
     Recall {
         query: String,
         limit: usize,
+        follow_seq: Option<u64>,
+        depth: usize,
+        dir: String,
     },
     /// `reward <score> [attributions csv | --recall-id N]` — Adam-update edge weights.
     Reward {
@@ -99,18 +105,7 @@ pub fn parse_args(argv: &[String]) -> Command {
     };
     let rest: Vec<&str> = words.map(String::as_str).collect();
     match command.as_str() {
-        "ingest" => {
-            let text = rest.join(" ");
-            if text.trim().is_empty() {
-                Command::Invalid {
-                    message: "ingest needs text: engram ingest <text...>".to_string(),
-                }
-            } else {
-                Command::Ingest {
-                    text,
-                }
-            }
-        }
+        "ingest" => parse_ingest(&rest),
         "recall" => parse_recall(&rest),
         "reward" => parse_reward(&rest),
         "consolidate" => Command::Consolidate,
@@ -127,9 +122,73 @@ pub fn parse_args(argv: &[String]) -> Command {
     }
 }
 
-/// Parse the tail of `recall <query...> [--limit N]`.
+/// Parse the tail of `ingest <text...> [--seq <prev_id>] [--seq-pos N]`.
+fn parse_ingest(rest: &[&str]) -> Command {
+    let mut prev_id: Option<u64> = None;
+    let mut seq_pos: Option<i64> = None;
+    let mut text_parts: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let w = rest[i];
+        if w == "--seq" {
+            i += 1;
+            if let Some(v) = rest.get(i).and_then(|s| s.parse::<u64>().ok()) {
+                prev_id = Some(v);
+            } else {
+                return Command::Invalid {
+                    message: "--seq needs a number: engram ingest <text...> [--seq <prev_id>]".to_string(),
+                };
+            }
+        } else if let Some(v) = w.strip_prefix("--seq=") {
+            if let Ok(n) = v.parse::<u64>() {
+                prev_id = Some(n);
+            } else {
+                return Command::Invalid {
+                    message: "--seq needs a number: engram ingest <text...> [--seq <prev_id>]".to_string(),
+                };
+            }
+        } else if w == "--seq-pos" {
+            i += 1;
+            if let Some(v) = rest.get(i).and_then(|s| s.parse::<i64>().ok()) {
+                seq_pos = Some(v);
+            } else {
+                return Command::Invalid {
+                    message: "--seq-pos needs a number: engram ingest <text...> [--seq-pos N]".to_string(),
+                };
+            }
+        } else if let Some(v) = w.strip_prefix("--seq-pos=") {
+            if let Ok(n) = v.parse::<i64>() {
+                seq_pos = Some(n);
+            } else {
+                return Command::Invalid {
+                    message: "--seq-pos needs a number: engram ingest <text...> [--seq-pos N]".to_string(),
+                };
+            }
+        } else {
+            text_parts.push(w);
+        }
+        i += 1;
+    }
+    let text = text_parts.join(" ");
+    if text.trim().is_empty() {
+        Command::Invalid {
+            message: "ingest needs text: engram ingest <text...>".to_string(),
+        }
+    } else {
+        Command::Ingest {
+            text,
+            prev_id,
+            seq_pos,
+        }
+    }
+}
+
+/// Parse the tail of `recall <query...> [--limit N] [--follow-seq <id> --depth N --dir up|down|both]`.
 fn parse_recall(rest: &[&str]) -> Command {
     let mut limit = DEFAULT_RECALL_LIMIT;
+    let mut follow_seq: Option<u64> = None;
+    let mut depth: usize = 10;
+    let mut dir = "down".to_string();
     let mut query_parts: Vec<&str> = Vec::new();
     let mut index = 0;
     while index < rest.len() {
@@ -152,13 +211,65 @@ fn parse_recall(rest: &[&str]) -> Command {
                 };
             };
             limit = value;
+        } else if word == "--follow-seq" {
+            index += 1;
+            let value = rest.get(index).and_then(|s| s.parse::<u64>().ok());
+            let Some(value) = value else {
+                return Command::Invalid {
+                    message: "--follow-seq needs a number: engram recall <query...> [--follow-seq <id>]"
+                        .to_string(),
+                };
+            };
+            follow_seq = Some(value);
+        } else if let Some(value) = word.strip_prefix("--follow-seq=") {
+            let Ok(value) = value.parse::<u64>() else {
+                return Command::Invalid {
+                    message: "--follow-seq needs a number: engram recall <query...> [--follow-seq <id>]"
+                        .to_string(),
+                };
+            };
+            follow_seq = Some(value);
+        } else if word == "--depth" {
+            index += 1;
+            let value = rest.get(index).and_then(|s| s.parse::<usize>().ok());
+            let Some(value) = value else {
+                return Command::Invalid {
+                    message: "--depth needs a number: engram recall <query...> [--depth N]"
+                        .to_string(),
+                };
+            };
+            depth = value;
+        } else if let Some(value) = word.strip_prefix("--depth=") {
+            let Ok(value) = value.parse::<usize>() else {
+                return Command::Invalid {
+                    message: "--depth needs a number: engram recall <query...> [--depth N]"
+                        .to_string(),
+                };
+            };
+            depth = value;
+        } else if word == "--dir" {
+            index += 1;
+            let value = rest.get(index).copied().unwrap_or("");
+            if !matches!(value, "up" | "down" | "both") {
+                return Command::Invalid {
+                    message: "--dir must be up|down|both".to_string(),
+                };
+            }
+            dir = value.to_string();
+        } else if let Some(value) = word.strip_prefix("--dir=") {
+            if !matches!(value, "up" | "down" | "both") {
+                return Command::Invalid {
+                    message: "--dir must be up|down|both".to_string(),
+                };
+            }
+            dir = value.to_string();
         } else {
             query_parts.push(word);
         }
         index += 1;
     }
     let query = query_parts.join(" ");
-    if query.trim().is_empty() {
+    if query.trim().is_empty() && follow_seq.is_none() {
         Command::Invalid {
             message: "recall needs a query: engram recall <query...> [--limit N]".to_string(),
         }
@@ -166,6 +277,9 @@ fn parse_recall(rest: &[&str]) -> Command {
         Command::Recall {
             query,
             limit,
+            follow_seq,
+            depth,
+            dir,
         }
     }
 }
@@ -250,8 +364,8 @@ fn usage_all() -> &'static str {
     "usage: engram <command> [args]\n\
      \n\
      commands:\n\
-     \x20 ingest <text...>                    store one episodic memory\n\
-     \x20 recall <query...> [--limit N]       recall top-N memories as JSON (default 5)\n\
+     \x20 ingest <text...> [--seq <prev_id> --seq-pos N]  store one episodic memory (sequential chain via TemporalSequence)\n\
+     \x20 recall <query...> [--limit N] [--follow-seq <id> --depth N --dir up|down|both]  recall top-N memories as JSON (default 5) + sequential annotation\n\
      \x20 reward <score> [--recall-id N | attributions csv]  reward a recall (ledger id) or raw attributions\n\
      \x20 consolidate                         run one consolidation cycle\n\
      \x20 setup                               create Engram vector index (dim from env EMBEDDING_DIM)\n\
@@ -365,9 +479,11 @@ fn daemon_token() -> Option<String> {
 /// listens. Auth mirrors the server (`Authorization: Bearer` when set).
 async fn try_daemon(command: &Command) -> Option<i32> {
     let body = match command {
-        Command::Ingest { text } => serde_json::json!({"command": "ingest", "text": text}),
-        Command::Recall { query, limit } => {
-            serde_json::json!({"command": "recall", "query": query, "limit": limit})
+        Command::Ingest { text, prev_id, seq_pos } => {
+            serde_json::json!({"command": "ingest", "text": text, "prev_id": prev_id, "seq_pos": seq_pos})
+        }
+        Command::Recall { query, limit, follow_seq, depth, dir } => {
+            serde_json::json!({"command": "recall", "query": query, "limit": limit, "follow_seq": follow_seq, "depth": depth, "dir": dir})
         }
         Command::Reward { score, attributions, recall_id } => {
             serde_json::json!({"command": "reward", "score": score, "attributions": attributions, "recall_id": recall_id})
@@ -644,40 +760,65 @@ async fn dispatch(command: Command) -> i32 {
         }
     };
     match command {
-        Command::Ingest {
-            text,
-        } => match cli.ingest(&text).await {
-            Ok(id) => {
-                println!("{id}");
-                0
+        Command::Ingest { text, prev_id, seq_pos } => {
+            let out = if let Some(pid) = prev_id {
+                cli.ingest_sequential(&text, Some(pid), seq_pos).await
+            } else {
+                cli.ingest(&text).await
+            };
+            match out {
+                Ok(id) => {
+                    println!("{id}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("engram: error: ingest failed: {error}");
+                    1
+                }
             }
-            Err(error) => {
-                eprintln!("engram: error: ingest failed: {error}");
-                1
-            }
-        },
-        Command::Recall {
-            query,
-            limit,
-        } => match cli.recall(&query, limit).await {
-            Ok(results) => {
-                let recall_id = cli.last_recall_id().await;
-                match serde_json::to_string(&serde_json::json!({"results": results, "recall_id": recall_id})) {
-                    Ok(json) => {
-                        println!("{json}");
-                        0
+        }
+        Command::Recall { query, limit, follow_seq, depth, dir } => {
+            if let Some(sid) = follow_seq {
+                match cli.follow_sequence(sid, depth, &dir).await {
+                    Ok(chain) => {
+                        match serde_json::to_string(&serde_json::json!({"sequential_chain": chain, "start_id": sid, "depth": depth, "dir": dir})) {
+                            Ok(json) => {
+                                println!("{json}");
+                                0
+                            }
+                            Err(error) => {
+                                eprintln!("engram: error: failed to encode chain: {error}");
+                                1
+                            }
+                        }
                     }
                     Err(error) => {
-                        eprintln!("engram: error: failed to encode results: {error}");
+                        eprintln!("engram: error: follow-sequence failed: {error}");
+                        1
+                    }
+                }
+            } else {
+                match cli.recall(&query, limit).await {
+                    Ok(results) => {
+                        let recall_id = cli.last_recall_id().await;
+                        match serde_json::to_string(&serde_json::json!({"results": results, "recall_id": recall_id})) {
+                            Ok(json) => {
+                                println!("{json}");
+                                0
+                            }
+                            Err(error) => {
+                                eprintln!("engram: error: failed to encode results: {error}");
+                                1
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("engram: error: recall failed: {error}");
                         1
                     }
                 }
             }
-            Err(error) => {
-                eprintln!("engram: error: recall failed: {error}");
-                1
-            }
-        },
+        }
         Command::Reward {
             score,
             attributions,
@@ -794,7 +935,9 @@ mod tests {
         assert_eq!(
             parse_args(&argv(&["ingest", "the", "sky", "is", "blue"])),
             Command::Ingest {
-                text: "the sky is blue".to_string()
+                text: "the sky is blue".to_string(),
+                prev_id: None,
+                seq_pos: None
             }
         );
     }
@@ -815,7 +958,10 @@ mod tests {
             parse_args(&argv(&["recall", "blue", "sky"])),
             Command::Recall {
                 query: "blue sky".to_string(),
-                limit: DEFAULT_RECALL_LIMIT
+                limit: DEFAULT_RECALL_LIMIT,
+                follow_seq: None,
+                depth: 10,
+                dir: "down".to_string()
             }
         );
     }
@@ -826,14 +972,20 @@ mod tests {
             parse_args(&argv(&["recall", "--limit", "3", "blue", "sky"])),
             Command::Recall {
                 query: "blue sky".to_string(),
-                limit: 3
+                limit: 3,
+                follow_seq: None,
+                depth: 10,
+                dir: "down".to_string()
             }
         );
         assert_eq!(
             parse_args(&argv(&["recall", "blue", "sky", "--limit=7"])),
             Command::Recall {
                 query: "blue sky".to_string(),
-                limit: 7
+                limit: 7,
+                follow_seq: None,
+                depth: 10,
+                dir: "down".to_string()
             }
         );
     }
