@@ -75,6 +75,8 @@ pub enum Command {
     Setup,
     /// `stats` — print aggregate memory statistics as JSON.
     Stats,
+    /// `status` — check embedding and LLM reachability + stats.
+    Status,
     /// `mcp-server` — serve the full MCP server over stdio.
     McpServer,
     /// `mcp-tools` — serve the MCP tool subset over stdio.
@@ -114,6 +116,7 @@ pub fn parse_args(argv: &[String]) -> Command {
         "mcp-server" => Command::McpServer,
         "mcp-tools" => Command::McpTools,
         "serve" | "daemon" | "up" => Command::Serve,
+        "status" => Command::Status,
         "help" | "--help" | "-h" => Command::Help,
         "help-all" | "--help-all" => Command::HelpAll,
         other => Command::Invalid {
@@ -347,16 +350,17 @@ fn parse_setup(rest: &[&str]) -> Command {
     }
 }
 
-/// Agent-focused usage: the 5 memory commands (for `help`/`--help`/`-h` and invalid).
+/// Agent-focused usage: the 6 memory commands (for `help`/`--help`/`-h` and invalid).
 fn usage() -> &'static str {
     "usage: engram <command> [args]\n\
      \n\
      commands:\n\
-     \x20 ingest <text...>                    store one episodic memory\n\
-     \x20 recall <query...> [--limit N]       recall top-N memories as JSON (default 5)\n\
+     \x20 ingest <text...> [--seq <prev_id> --seq-pos N]  store one episodic memory (sequential chain via TemporalSequence)\n\
+     \x20 recall <query...> [--limit N] [--follow-seq <id> --depth N --dir up|down|both]  recall top-N memories as JSON (default 5) + sequential annotation\n\
      \x20 reward <score> [--recall-id N | attributions csv]  reward a recall (ledger id) or raw attributions\n\
      \x20 consolidate                         run one consolidation cycle\n\
-     \x20 stats                               print memory stats as JSON"
+     \x20 stats                               print memory stats as JSON\n\
+     \x20 status                              check embedding and LLM reachability + stats"
 }
 
 /// Operator usage: all commands (for `--help-all` / `help-all`).
@@ -391,14 +395,27 @@ fn usage_all() -> &'static str {
 fn build_chat_provider(config: &LlmConfig) -> Result<Box<dyn LlmProvider>, String> {
     let name = std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
     match name.trim().to_lowercase().as_str() {
-        "" | "openai" | "xai" | "grok" => {
+        "" | "openai" | "xai" | "grok" | "deepseek" | "deepseek-chat" | "deepseek-flash" => {
             // xAI Grok is OpenAI-compatible at https://api.x.ai/v1 — use the same path.
-            // Allow `XAI_API_KEY` to override `OPENAI_API_KEY` when set.
+            // Allow `XAI_API_KEY` / `DEEPSEEK_API_KEY` to override `OPENAI_API_KEY` when set.
             let mut cfg = config.clone();
-            if name.trim().to_lowercase().as_str() == "xai" || name.trim().to_lowercase().as_str() == "grok" {
+            let low = name.trim().to_lowercase();
+            if low == "xai" || low == "grok" {
                 if let Ok(key) = std::env::var("XAI_API_KEY") {
                     if !key.trim().is_empty() {
                         cfg.api_key = key;
+                    }
+                }
+            } else if low.starts_with("deepseek") {
+                if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
+                    if !key.trim().is_empty() {
+                        cfg.api_key = key;
+                    }
+                }
+                // Allow DEEPSEEK_BASE_URL to override OPENAI_BASE_URL when LLM_PROVIDER deepseek
+                if let Ok(url) = std::env::var("DEEPSEEK_BASE_URL") {
+                    if !url.trim().is_empty() {
+                        cfg.base_url = url.trim().to_string();
                     }
                 }
             }
@@ -493,6 +510,7 @@ async fn try_daemon(command: &Command) -> Option<i32> {
             serde_json::json!({"command": "setup"})
         }
         Command::Stats => serde_json::json!({"command": "stats"}),
+        Command::Status => serde_json::json!({"command": "status"}),
         _ => return None,
     };
     let client = reqwest::Client::new();
@@ -690,7 +708,7 @@ async fn run(argv: Vec<String>) -> i32 {
             ..
         } | Command::Reward {
             ..
-        } | Command::Setup | Command::Consolidate | Command::Stats => {
+        } | Command::Setup | Command::Consolidate | Command::Stats | Command::Status => {
             dispatch(command).await
         }
     }
@@ -878,6 +896,43 @@ async fn dispatch(command: Command) -> i32 {
                 eprintln!("engram: error: stats failed: {error}");
                 1
             }
+        },
+        Command::Status => {
+            // Storage stats
+            let storage_json = match cli.stats().await {
+                Ok(stats) => serde_json::json!({"ok": true, "stats": stats}),
+                Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+            };
+            // Embedding reachability: try embed "ping" with 8s timeout
+            let embedding_json = match build_embedding_provider(&config.llm) {
+                Ok(provider) => {
+                    let fut = provider.embed("ping");
+                    match tokio::time::timeout(std::time::Duration::from_secs(8), fut).await {
+                        Ok(Ok(v)) => serde_json::json!({"ok": true, "dim": v.len(), "provider": std::env::var("EMBEDDING_PROVIDER").unwrap_or_else(|_| "openai".to_string())}),
+                        Ok(Err(e)) => serde_json::json!({"ok": false, "error": e.to_string()}),
+                        Err(_) => serde_json::json!({"ok": false, "error": "timeout after 8s"}),
+                    }
+                }
+                Err(e) => serde_json::json!({"ok": false, "error": e}),
+            };
+            // LLM reachability: try chat "ping" with 8s timeout, check reasoning
+            let llm_json = match build_chat_provider(&config.llm) {
+                Ok(provider) => {
+                    let fut = provider.chat("ping");
+                    match tokio::time::timeout(std::time::Duration::from_secs(8), fut).await {
+                        Ok(Ok(v)) => {
+                            let is_reasoning = v.contains("<think>") || v.to_lowercase().contains("reasoning") || v.len() > 500;
+                            serde_json::json!({"ok": true, "provider": std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string()), "model": config.llm.model, "base_url": config.llm.base_url, "sample": v.chars().take(120).collect::<String>(), "reasoning_detected": is_reasoning, "note": if is_reasoning { "response looks like reasoning - may need prompt tuning for instant" } else { "instant" }})
+                        }
+                        Ok(Err(e)) => serde_json::json!({"ok": false, "error": e.to_string(), "provider": std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string())}),
+                        Err(_) => serde_json::json!({"ok": false, "error": "timeout after 8s"}),
+                    }
+                }
+                Err(e) => serde_json::json!({"ok": false, "error": e}),
+            };
+            let out = serde_json::json!({"storage": storage_json, "embedding": embedding_json, "llm": llm_json});
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+            0
         },
         // `mnemos-mcp-server` returns `mnemos_core::Result`; `mnemos-mcp-tools`
         // returns `Result<_, rmcp::RmcpError>` — both map to a message + exit 1.

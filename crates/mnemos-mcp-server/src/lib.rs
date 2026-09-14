@@ -91,11 +91,12 @@ enum Command {
     Reward,
     Consolidate,
     Stats,
+    Status,
     Help,
 }
 
-/// Valid `help` topics (the five commands plus `help` itself).
-const HELP_TOPICS: [&str; 6] = ["help", "ingest", "recall", "reward", "consolidate", "stats"];
+/// Valid `help` topics (the six commands plus `help` itself).
+const HELP_TOPICS: [&str; 7] = ["help", "ingest", "recall", "reward", "consolidate", "stats", "status"];
 
 /// Parse the raw `command` string.
 ///
@@ -107,6 +108,7 @@ fn parse_command(raw: &str) -> Result<Command, McpError> {
         "reward" => Ok(Command::Reward),
         "consolidate" => Ok(Command::Consolidate),
         "stats" => Ok(Command::Stats),
+        "status" => Ok(Command::Status),
         "help" => Ok(Command::Help),
         other => Err(McpError::invalid_params(
             format!("unknown command: {other}"),
@@ -159,11 +161,12 @@ fn reward_args(params: &MnemosCliParams) -> Result<(&[f64], f64), McpError> {
 fn global_help() -> String {
     [
         "engram_cli commands (same as `mnemos <command>` on the shell via mnemos-app):",
-        "- ingest: store one text episode",
-        "- recall: search memory by resonance",
+        "- ingest: store one text episode (supports --seq sequential chain)",
+        "- recall: search memory by resonance (supports --follow-seq sequential walk)",
         "- reward: apply a scalar reward signal",
         "- consolidate: run one consolidation (sleep) cycle",
         "- stats: show aggregate memory counts",
+        "- status: check embedding and LLM reachability + stats",
         "Call with {\"command\":\"help\",\"args\":[\"<command>\"]} for per-command usage.",
     ]
     .join("\n")
@@ -218,6 +221,15 @@ fn topic_help(topic: &str) -> Option<String> {
                 "stats: show aggregate memory counts (engrams, concepts, identities).",
                 "params: none.",
                 "example: {\"command\":\"stats\"}",
+            ]
+            .join("\n"),
+        ),
+        "status" => Some(
+            [
+                "status: check embedding and LLM reachability + stats.",
+                "params: none.",
+                "example: {\"command\":\"status\"}",
+                "checks: storage (Helix stats), embedding (embed ping), llm (chat ping, instant no reasoning)",
             ]
             .join("\n"),
         ),
@@ -339,6 +351,10 @@ impl MnemosServer {
             Command::Stats => {
                 let stats = self.cli.stats().await.map_err(internal)?;
                 serde_json::json!({ "stats": stats })
+            }
+            Command::Status => {
+                let stats = self.cli.stats().await.map_err(internal)?;
+                serde_json::json!({ "stats": stats, "embedding": {"note": "use shell engram status for live ping"}, "llm": {"note": "use shell engram status for live ping"} })
             }
         };
         serde_json::to_string(&payload).map_err(internal)

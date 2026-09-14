@@ -5,11 +5,12 @@
 //!
 //! | Tool | Params | Returns (JSON string) |
 //! |------|--------|---------------------|
-//! | `engram_ingest` | `{ text }` | `{ "engram_id": … }` |
-//! | `engram_recall` | `{ query, limit? }` (default `limit` = 10) | `{ "results": […] }` |
+//! | `engram_ingest` | `{ text, prev_id?, seq_pos? }` | `{ "engram_id": … }` |
+//! | `engram_recall` | `{ query, limit?, follow_seq?, seq_depth?, seq_dir? }` (default `limit` = 10) | `{ "results": […] }` or `{ "sequential_chain": […] }` |
 //! | `engram_reward` | `{ attributions: number[], score }` | `{ "ok": true }` |
 //! | `engram_consolidate` | `{}` | `{ "report": {…} }` |
 //! | `engram_stats` | `{}` | `{ "stats": {…} }` |
+//! | `engram_status` | `{}` | `{ "stats": {…}, "embedding": {…}, "llm": {…} }` |
 //! | `help` | `{ tool? }` | per-tool usage or tool list |
 //!
 //! Two-layer help:
@@ -241,6 +242,16 @@ impl MnemosMcpTools {
         to_json_string(serde_json::json!({ "stats": stats }))
     }
 
+    /// Fetch status (embedding + LLM + stats); returns `{ "stats": {…}, "embedding": {…}, "llm": {…} }`.
+    #[tool(
+        name = "engram_status",
+        description = "Check embedding and LLM reachability plus stats. Returns status JSON. Call help with tool=\"engram_status\" for full usage."
+    )]
+    pub async fn status(&self) -> Result<String, ErrorData> {
+        let stats = self.cli.stats().await.map_err(internal_error)?;
+        to_json_string(serde_json::json!({ "stats": stats, "embedding": {"note": "use shell engram status for live ping"}, "llm": {"note": "use shell engram status for live ping"} }))
+    }
+
     /// Get usage help for a tool (or all tools when `tool` is omitted).
     ///
     /// Layer-2 help: returns full param specs, types, and example JSON for
@@ -261,10 +272,11 @@ impl MnemosMcpTools {
             Some("engram_reward") => help_reward(),
             Some("engram_consolidate") => help_consolidate(),
             Some("engram_stats") => help_stats(),
+            Some("engram_status") => help_status(),
             Some("help") => help_help(),
             Some(other) => {
                 return Err(ErrorData::invalid_params(
-                    format!("unknown tool: {other}. valid: engram_ingest, engram_recall, engram_reward, engram_consolidate, engram_stats, help"),
+                    format!("unknown tool: {other}. valid: engram_ingest, engram_recall, engram_reward, engram_consolidate, engram_stats, engram_status, help"),
                     None,
                 ));
             }
@@ -276,12 +288,13 @@ impl MnemosMcpTools {
 /// One-line summary of every tool (layer-1 help extended).
 fn tool_list() -> String {
     "mnemos memory tools (call help with tool=\"<name>\" for full usage):\n\
-     - engram_ingest: Ingest a text episode into memory.\n\
-     - engram_recall: Recall engrams resonating with a query.\n\
-     - engram_reward: Apply a scalar reward signal with per-engram attributions.\n\
-     - engram_consolidate: Run one memory consolidation (sleep) cycle.\n\
-     - engram_stats: Fetch aggregate memory stats (engrams, concepts, identities).\n\
-     - help: Get usage help (this list, or per-tool detail).".to_string()
+      - engram_ingest: Ingest a text episode into memory.\n\
+      - engram_recall: Recall engrams resonating with a query.\n\
+      - engram_reward: Apply a scalar reward signal with per-engram attributions.\n\
+      - engram_consolidate: Run one memory consolidation (sleep) cycle.\n\
+      - engram_stats: Fetch aggregate memory stats (engrams, concepts, identities).\n\
+      - engram_status: Check embedding and LLM reachability plus stats.\n\
+      - help: Get usage help (this list, or per-tool detail).".to_string()
 }
 
 /// Full usage for `engram_ingest`.
@@ -333,9 +346,17 @@ fn help_consolidate() -> String {
 /// Full usage for `engram_stats`.
 fn help_stats() -> String {
     "engram_stats: Fetch aggregate memory stats (engrams, concepts, identities).\n\
-     Params: none.\n\
-     Example: {}\n\
-     Returns: {\"stats\": {\"total_engrams\": 0, \"contradictions\": 0, \"concepts\": 0, \"identities\": 0}}".to_string()
+      Params: none.\n\
+      Example: {}\n\
+      Returns: {\"stats\": {\"total_engrams\": 0, \"contradictions\": 0, \"concepts\": 0, \"identities\": 0}}".to_string()
+}
+
+/// Full usage for `engram_status`.
+fn help_status() -> String {
+    "engram_status: Check embedding and LLM reachability plus stats.\n\
+      Params: none.\n\
+      Example: {}\n\
+      Returns: {\"stats\": {\"total_engrams\": 0, \"contradictions\": 0, \"concepts\": 0, \"identities\": 0}, \"embedding\": {\"ok\": true}, \"llm\": {\"ok\": true}}".to_string()
 }
 
 /// Full usage for `help` itself.
@@ -425,6 +446,7 @@ mod tests {
             "engram_reward",
             "engram_consolidate",
             "engram_stats",
+            "engram_status",
             "help",
         ] {
             assert!(list.contains(name), "tool list should mention {name}");
@@ -439,6 +461,7 @@ mod tests {
             ("engram_reward", help_reward()),
             ("engram_consolidate", help_consolidate()),
             ("engram_stats", help_stats()),
+            ("engram_status", help_status()),
             ("help", help_help()),
         ] {
             assert!(

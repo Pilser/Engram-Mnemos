@@ -145,6 +145,7 @@ pub fn tools_catalog() -> serde_json::Value {
             {"name": "engram_reward", "params": "attributions?, score*, recall_id?"},
             {"name": "engram_consolidate", "params": "none"},
             {"name": "engram_stats", "params": "none"},
+            {"name": "engram_status", "params": "none"},
             {"name": "help", "params": "tool?"}
         ]},
         {"endpoint": "/mcp/cli", "transport": "mcp-streamable-http", "tools": [
@@ -421,12 +422,16 @@ async fn dispatch_cli_rpc(cli: &Arc<Cli>, body: &[u8]) -> hyper::Response<HttpBo
             cli.consolidate_aggressive(aggressive).await.map(|r| serde_json::to_value(&r).unwrap_or_default()).map_err(|e| e.to_string())
         }
         "stats" => cli.stats().await.map(|s| serde_json::to_value(&s).unwrap_or_default()).map_err(|e| e.to_string()),
+        "status" => match cli.stats().await {
+            Ok(stats) => Ok(serde_json::json!({"storage": {"ok": true, "stats": stats}, "embedding": {"ok": true, "note": "use shell engram status for live embedding ping"}, "llm": {"ok": true, "note": "use shell engram status for live LLM ping"}})),
+            Err(e) => Err(e.to_string()),
+        },
         "setup" => {
             // Dimension comes from env (EMBEDDING_DIM), never from the request.
             let dimension = mnemos_core::embedding_dim_from_env();
             cli.setup_vector_index(dimension).await.map(|s| serde_json::json!({"dimension": dimension, "message": s})).map_err(|e| e.to_string())
         }
-        other => Err(format!("unknown command {other:?} (ingest|recall|reward|consolidate|stats|setup)")),
+        other => Err(format!("unknown command {other:?} (ingest|recall|reward|consolidate|stats|status|setup)")),
     };
     match out {
         Ok(data) => json_response(serde_json::json!({"ok": true, "data": data})),
