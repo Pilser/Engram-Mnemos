@@ -353,10 +353,13 @@ fn parse_setup(rest: &[&str]) -> Command {
 /// Agent-focused usage: the 6 memory commands (for `help`/`--help`/`-h` and invalid).
 fn usage() -> &'static str {
     "usage: engram <command> [args]\n\
+     capability: episodic memory with optional sequential story chains (TemporalSequence)\n\
      \n\
      commands:\n\
-     \x20 ingest <text...> [--seq <prev_id> --seq-pos N]  store one episodic memory (sequential chain via TemporalSequence)\n\
-     \x20 recall <query...> [--limit N] [--follow-seq <id> --depth N --dir up|down|both]  recall top-N memories as JSON (default 5) + sequential annotation\n\
+     \x20 ingest <text...>  store one episodic memory (no sequence needed)\n\
+     \x20   optionally sequential: --seq <prev_id> links this engram after <prev_id> via TemporalSequence (use previous ingest's returned id); --seq-pos N groups many engrams at same position N before next (fan-out at level)\n\
+     \x20 recall <query...> [--limit N]  recall top-N memories as JSON (default 5); sequential results show [sequential: pos=N head=...]\n\
+     \x20   optionally walk chain: --follow-seq <id> start from engram <id> (ignore query), --depth N steps (default 10), --dir up|down|both (default down) to traverse TemporalSequence\n\
      \x20 reward <score> [--recall-id N | attributions csv]  reward a recall (ledger id) or raw attributions\n\
      \x20 consolidate                         run one consolidation cycle\n\
      \x20 stats                               print memory stats as JSON\n\
@@ -366,14 +369,18 @@ fn usage() -> &'static str {
 /// Operator usage: all commands (for `--help-all` / `help-all`).
 fn usage_all() -> &'static str {
     "usage: engram <command> [args]\n\
+     capability: episodic memory with optional sequential story chains (TemporalSequence)\n\
      \n\
      commands:\n\
-     \x20 ingest <text...> [--seq <prev_id> --seq-pos N]  store one episodic memory (sequential chain via TemporalSequence)\n\
-     \x20 recall <query...> [--limit N] [--follow-seq <id> --depth N --dir up|down|both]  recall top-N memories as JSON (default 5) + sequential annotation\n\
+     \x20 ingest <text...>  store one episodic memory (no sequence needed)\n\
+     \x20   optionally sequential: --seq <prev_id> links after <prev_id> via TemporalSequence (use previous ingest's returned id); --seq-pos N groups many engrams at same position N before next (fan-out)\n\
+     \x20 recall <query...> [--limit N]  recall top-N memories as JSON (default 5); sequential results show [sequential: pos=N head=...]\n\
+     \x20   optionally walk chain: --follow-seq <id> start from <id> (ignore query), --depth N steps (default 10), --dir up|down|both (default down) to traverse TemporalSequence\n\
      \x20 reward <score> [--recall-id N | attributions csv]  reward a recall (ledger id) or raw attributions\n\
      \x20 consolidate                         run one consolidation cycle\n\
      \x20 setup                               create Engram vector index (dim from env EMBEDDING_DIM)\n\
      \x20 stats                               print memory stats as JSON\n\
+     \x20 status                              check embedding and LLM reachability + stats\n\
      \x20 mcp-server                           serve the full MCP server over stdio\n\
      \x20 mcp-tools                            serve the MCP tool subset over stdio\n\
      \x20 serve (daemon, up)                   persistent daemon: HTTP /mcp*, /cli, /health, /telemetry* + background tasks (stays in terminal)\n\
