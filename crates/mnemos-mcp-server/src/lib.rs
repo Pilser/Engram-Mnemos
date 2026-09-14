@@ -202,9 +202,9 @@ fn topic_help(topic: &str) -> Option<String> {
         ),
         "reward" => Some(
             [
-                "reward: apply a scalar reward signal with per-engram attributions. Must reward each recall (score -1.0 to 1.0: 1.0 positive, -1.0 negative, 0 no-op).",
-                "params: attributions (array of numbers, required), score (number -1.0 to 1.0, required).",
-                "example: {\"command\":\"reward\",\"attributions\":[0.5,0.5],\"score\":1.0}",
+                "reward: apply scalar reward based on relevancy of recalled memories so memory learns (edge weights via Adam). Must reward each recall (score -1.0 to 1.0: 1.0 relevant positive, -1.0 irrelevant negative, 0 no-op).",
+                "params: attributions (array of numbers, required) or recall_id (ledger id from recall), score (number -1.0 to 1.0, required) based on relevancy.",
+                "example: {\"command\":\"reward\",\"attributions\":[0.5,0.5],\"score\":1.0} or {\"command\":\"reward\",\"recall_id\":42,\"score\":0.8}",
             ]
             .join("\n"),
         ),

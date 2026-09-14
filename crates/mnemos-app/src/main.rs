@@ -360,7 +360,7 @@ fn usage() -> &'static str {
      \x20   optionally sequential: --seq <prev_id> links this engram after <prev_id> via TemporalSequence (use previous ingest's returned id); --seq-pos N groups many engrams at same position N before next (fan-out at level)\n\
      \x20 recall <query...> [--limit N]  recall top-N memories as JSON (default 5); sequential results show [sequential: pos=N head=...]\n\
      \x20   optionally walk chain: --follow-seq <id> start from engram <id> (ignore query), --depth N steps (default 10), --dir up|down|both (default down) to traverse TemporalSequence\n\
-     \x20 reward <score -1.0 to 1.0> [--recall-id N | attributions csv]  reward a recall (ledger id) or raw attributions — must reward each recall (1.0 positive, -1.0 negative, 0 no-op)\n\
+     \x20 reward <score -1.0 to 1.0> [--recall-id N | attributions csv]  reward a recall based on relevancy of recalled memories so memory learns (edge weights via Adam) — must reward each recall (1.0 relevant positive, -1.0 irrelevant negative, 0 no-op)\n\
      \x20 consolidate                         run one consolidation cycle\n\
      \x20 stats                               print memory stats as JSON\n\
      \x20 status                              check embedding and LLM reachability + stats"
@@ -376,7 +376,7 @@ fn usage_all() -> &'static str {
      \x20   optionally sequential: --seq <prev_id> links after <prev_id> via TemporalSequence (use previous ingest's returned id); --seq-pos N groups many engrams at same position N before next (fan-out)\n\
      \x20 recall <query...> [--limit N]  recall top-N memories as JSON (default 5); sequential results show [sequential: pos=N head=...]\n\
      \x20   optionally walk chain: --follow-seq <id> start from <id> (ignore query), --depth N steps (default 10), --dir up|down|both (default down) to traverse TemporalSequence\n\
-     \x20 reward <score -1.0 to 1.0> [--recall-id N | attributions csv]  reward a recall (ledger id) or raw attributions — must reward each recall (1.0 positive, -1.0 negative, 0 no-op)\n\
+     \x20 reward <score -1.0 to 1.0> [--recall-id N | attributions csv]  reward a recall based on relevancy of recalled memories so memory learns (edge weights via Adam) — must reward each recall (1.0 relevant positive, -1.0 irrelevant negative, 0 no-op)\n\
      \x20 consolidate                         run one consolidation cycle\n\
      \x20 setup                               create Engram vector index (dim from env EMBEDDING_DIM)\n\
      \x20 stats                               print memory stats as JSON\n\
