@@ -280,7 +280,7 @@ impl MnemosServer {
     /// Shell parity: same commands exist as `mnemos <command>` on the shell.
     #[tool(
         name = "engram_cli",
-        description = "Single entry point for the MNEMOS memory CLI. Call {\"command\":\"help\"} for the command list, or {\"command\":\"help\",\"args\":[\"<command>\"]} for per-command usage (params, types, example JSON — like --help per command). Commands: ingest (prev_id?, seq_pos? for sequential), recall (follow_seq?, seq_depth?, seq_dir? for sequential walk), reward, consolidate, stats. Shell parity: same commands exist as `mnemos <command>` on the shell."
+        description = "Single entry point for the MNEMOS memory CLI. Call {\"command\":\"help\"} for the command list, or {\"command\":\"help\",\"args\":[\"<command>\"]} for per-command usage (params, types, example JSON — like --help per command). Commands: ingest, recall, reward, consolidate, stats (ingest supports prev_id/seq_pos for sequential TemporalSequence, recall supports follow_seq/seq_depth/seq_dir). Shell parity: same commands exist as `mnemos <command>` on the shell."
     )]
     async fn engram_cli(
         &self,
