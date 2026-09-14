@@ -193,16 +193,53 @@ fn is_retriable_error(error: &reqwest::Error) -> bool {
     error.is_timeout() || error.is_connect() || error.is_request()
 }
 
+/// Strip reasoning/think tags that some providers (DeepSeek) may embed in content.
+///
+/// DeepSeek reasoner separates `reasoning_content` from `content`, but other
+/// deployments may inline `<think>...</think>` in `content`. Stripping here
+/// makes all callers (tagger/scorer/extractor/contradiction/mitosis) tolerant
+/// to unexpected reasoning without breaking JSON/number parsing. The separate
+/// `reasoning_content` field is intentionally ignored — we want instant answers.
+fn strip_reasoning(mut s: String) -> String {
+    // Remove <think>...</think> case-insensitive loops
+    loop {
+        let low = s.to_lowercase();
+        if let Some(start) = low.find("<think>") {
+            if let Some(end) = low[start..].find("</think>") {
+                let end_idx = start + end + "</think>".len();
+                s.replace_range(start..end_idx, "");
+                continue;
+            }
+        }
+        break;
+    }
+    // Also strip <reasoning>...</reasoning> if present
+    loop {
+        let low = s.to_lowercase();
+        if let Some(start) = low.find("<reasoning>") {
+            if let Some(end) = low[start..].find("</reasoning>") {
+                let end_idx = start + end + "</reasoning>".len();
+                s.replace_range(start..end_idx, "");
+                continue;
+            }
+        }
+        break;
+    }
+    s
+}
+
 /// Pull `choices[0].message.content` out of a Chat Completions body.
 ///
 /// # Errors
 ///
 /// Returns [`MnemosError::Llm`] when the content string is absent.
 fn extract_content(json: &serde_json::Value) -> Result<String> {
-    json.pointer("/choices/0/message/content")
+    let raw = json
+        .pointer("/choices/0/message/content")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| MnemosError::Llm(format!("missing choices[0].message.content: {json}")))
+        .ok_or_else(|| MnemosError::Llm(format!("missing choices[0].message.content: {json}")))?;
+    Ok(strip_reasoning(raw))
 }
 
 #[async_trait]
