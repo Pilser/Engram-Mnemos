@@ -582,7 +582,18 @@ impl<T: tokio::io::AsyncWrite + Unpin> hyper::rt::Write for TokioIo<T> {
 /// Returns [`mnemos_core::MnemosError::Http`] if a bind address is invalid,
 /// a listener fails to bind, or accepting connections fails. Failures are
 /// also recorded via telemetry (`mnemos-mcp-http` / `serve`).
-pub async fn serve(protocol: ProtocolTools, cli: Arc<Cli>) -> mnemos_core::Result<()> {
+/// Bind the HTTP listener from `MNEMOS_MCP_HOST`/`MNEMOS_MCP_PORT`.
+///
+/// Call this **before** opening storage: the daemon's embedded DB invalidates
+/// any older handle when a second process opens the same path, so a failed
+/// start (e.g. port already in use) must fail *here*, not after it has already
+/// broken a running daemon.
+///
+/// # Errors
+///
+/// Returns [`mnemos_core::MnemosError::Http`] on an invalid address or bind
+/// failure (also recorded via telemetry).
+pub async fn bind_listener() -> mnemos_core::Result<tokio::net::TcpListener> {
     let host = mcp_host_from_env();
     let port = mcp_port_from_env();
     let addr: SocketAddr = format!("{host}:{port}").parse().map_err(|err| {
@@ -591,11 +602,26 @@ pub async fn serve(protocol: ProtocolTools, cli: Arc<Cli>) -> mnemos_core::Resul
         record_serve_error(&failure.to_string());
         failure
     })?;
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|err| {
+    tokio::net::TcpListener::bind(addr).await.map_err(|err| {
         let failure = mnemos_core::MnemosError::Http(format!("bind {addr}: {err}"));
         record_serve_error(&failure.to_string());
         failure
-    })?;
+    })
+}
+
+/// Serve all surfaces on an already-bound listener (see [`bind_listener`]).
+///
+/// # Errors
+///
+/// Returns [`mnemos_core::MnemosError::Http`] when accepting connections fails.
+pub async fn serve_on(
+    listener: tokio::net::TcpListener,
+    protocol: ProtocolTools,
+    cli: Arc<Cli>,
+) -> mnemos_core::Result<()> {
+    let addr = listener
+        .local_addr()
+        .map_or_else(|_| "?".to_string(), |a| a.to_string());
     eprintln!("mnemos-mcp-http listening on http://{addr}{PROTOCOL_PATH} (protocol tools)");
     eprintln!("mnemos-mcp-http listening on http://{addr}{TOOLS_PATH} (multi-tool)");
     eprintln!("mnemos-mcp-http listening on http://{addr}{CLI_PATH} (cli single-tool)");
@@ -619,6 +645,17 @@ pub async fn serve(protocol: ProtocolTools, cli: Arc<Cli>) -> mnemos_core::Resul
             serve_stream(TokioIo::new(stream), &services, token, &peer.to_string()).await;
         });
     }
+}
+
+/// Bind and serve in one call (convenience; prefer [`bind_listener`] +
+/// [`serve_on`] so the bind happens before storage is opened).
+///
+/// # Errors
+///
+/// See [`bind_listener`] and [`serve_on`].
+pub async fn serve(protocol: ProtocolTools, cli: Arc<Cli>) -> mnemos_core::Result<()> {
+    let listener = bind_listener().await?;
+    serve_on(listener, protocol, cli).await
 }
 
 /// Cloneable bundle of the three rmcp services plus the daemon `Cli`.

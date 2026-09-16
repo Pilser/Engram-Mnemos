@@ -591,6 +591,16 @@ async fn try_daemon(command: &Command) -> Option<i32> {
 /// `/health`, `/telemetry*`) forever, and runs background consolidation when
 /// `MNEMOS_CONSOLIDATE_INTERVAL_SECS > 0`.
 async fn serve_forever(config: &MnemosConfig) -> i32 {
+    // Bind the port FIRST. Opening the embedded DB invalidates any older
+    // handle on the same path ("newer DB client"), so a second `serve` that
+    // would fail to bind must fail here — before it can break a live daemon.
+    let listener = match mnemos_mcp_http::bind_listener().await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("engram: error: {error}");
+            return 1;
+        }
+    };
     // Single embedded open per process: Helix invalidates older handles when
     // the same Disk path is opened twice ("newer DB client"), so every
     // pipeline and tool shares clones of this one handle.
@@ -646,7 +656,7 @@ async fn serve_forever(config: &MnemosConfig) -> i32 {
             return 1;
         }
     };
-    match mnemos_mcp_http::serve(protocol, cli).await {
+    match mnemos_mcp_http::serve_on(listener, protocol, cli).await {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("engram: error: serve failed: {error}");
