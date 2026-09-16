@@ -112,8 +112,17 @@ pub struct EngramCandidate {
     pub contradiction_flag: bool,
     /// Learned per-engram reward signal (updated by `reward`). Positive means
     /// the memory proved relevant when recalled; negative means it did not.
+    /// This is an exponential moving average in `[-1, 1]`, decayed over time.
     #[serde(default)]
     pub reward_score: f64,
+    /// Query embedding observed when `reward_score` was last updated. Used to
+    /// gate the reward by context similarity, so a negative on one topic does
+    /// not bury the memory for a different topic. Empty = ungated (global).
+    #[serde(default)]
+    pub reward_context: Vec<f32>,
+    /// RFC3339 timestamp of the last reward update (for decay). Empty = none.
+    #[serde(default)]
+    pub reward_updated_at: String,
     #[serde(rename = "$distance", default)]
     pub distance: f64,
 }
@@ -129,9 +138,17 @@ pub struct ResonanceResult {
     pub identity_alignment: f64,
     pub semantic_sim: f64,
     pub recency_weight: f64,
-    /// Learned per-engram reward signal applied as a CRR factor.
+    /// Learned per-engram reward signal (raw, `[-1, 1]`).
     #[serde(default)]
     pub reward_score: f64,
+    /// Applied reward factor after context gating + decay (neutral = 1.0).
+    #[serde(default = "default_reward_factor")]
+    pub reward_factor: f64,
+}
+
+/// Neutral reward factor (no learned effect).
+fn default_reward_factor() -> f64 {
+    1.0
 }
 
 /// Aggregate counts for CLI stats / MCP tools.

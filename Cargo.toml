@@ -27,6 +27,7 @@ members = [
     "crates/mnemos-mcp-protocol",
     "crates/mnemos-mcp-http",
     "crates/mnemos-mitosis",
+    "crates/mnemos-reranker",
 ]
 # Phase-gated expansion (append per phase as crates land):
 # Phase 1b: mnemos-storage, mnemos-llm-trait, mnemos-llm-openai
@@ -68,6 +69,7 @@ mnemos-contradiction = { path = "crates/mnemos-contradiction" }
 mnemos-mcp-protocol = { path = "crates/mnemos-mcp-protocol" }
 mnemos-mcp-http = { path = "crates/mnemos-mcp-http" }
 mnemos-mitosis = { path = "crates/mnemos-mitosis" }
+mnemos-reranker = { path = "crates/mnemos-reranker" }
 mnemos-app = { path = "crates/mnemos-app" }
 
 serde = { version = "1", features = ["derive"] }

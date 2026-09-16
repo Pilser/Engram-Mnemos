@@ -77,6 +77,8 @@ pub enum Command {
     Stats,
     /// `status` — check embedding and LLM reachability + stats.
     Status,
+    /// `train-reranker` — train the learned reranker from the feedback log.
+    TrainReranker,
     /// `mcp-server` — serve the full MCP server over stdio.
     McpServer,
     /// `mcp-tools` — serve the MCP tool subset over stdio.
@@ -117,6 +119,7 @@ pub fn parse_args(argv: &[String]) -> Command {
         "mcp-tools" => Command::McpTools,
         "serve" | "daemon" | "up" => Command::Serve,
         "status" => Command::Status,
+        "train-reranker" | "train_reranker" => Command::TrainReranker,
         "help" | "--help" | "-h" => Command::Help,
         "help-all" | "--help-all" => Command::HelpAll,
         other => Command::Invalid {
@@ -381,6 +384,7 @@ fn usage_all() -> &'static str {
      \x20 setup                               create Engram vector index (dim from env EMBEDDING_DIM)\n\
      \x20 stats                               print memory stats as JSON\n\
      \x20 status                              check embedding and LLM reachability + stats\n\
+     \x20 train-reranker                      train the learned reranker from the feedback log (operator; then set MNEMOS_RERANKER_ALPHA>0)\n\
      \x20 mcp-server                           serve the full MCP server over stdio\n\
      \x20 mcp-tools                            serve the MCP tool subset over stdio\n\
      \x20 serve (daemon, up)                   persistent daemon: HTTP /mcp*, /cli, /health, /telemetry* + background tasks (stays in terminal)\n\
@@ -727,6 +731,7 @@ async fn run(argv: Vec<String>) -> i32 {
             eprintln!("engram: error: {message}\n{}", usage());
             2
         }
+        Command::TrainReranker => train_reranker(),
         Command::McpServer | Command::McpTools | Command::Serve | Command::Ingest {
             ..
         } | Command::Recall {
@@ -981,6 +986,7 @@ async fn dispatch(command: Command) -> i32 {
         },
         Command::Help
         | Command::HelpAll
+        | Command::TrainReranker
         | Command::Invalid {
             ..
         } => {
@@ -992,6 +998,133 @@ async fn dispatch(command: Command) -> i32 {
             2
         }
     }
+}
+
+/// Feature vector for one logged candidate (must match
+/// [`mnemos_reranker::FEATURE_NAMES`] order).
+fn reranker_features_from_log(r: &serde_json::Value, position: usize) -> Vec<f64> {
+    let g = |k: &str| r.get(k).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    vec![
+        g("semantic_sim"),
+        g("recency_weight"),
+        g("emotional_charge").abs(),
+        g("importance_score"),
+        g("identity_alignment"),
+        g("reward_score"),
+        g("reward_factor"),
+        g("resonance_score"),
+        position as f64,
+    ]
+}
+
+/// Train the learned reranker (Option B) from the feedback log.
+///
+/// Labels are per-recall (one scalar reward covers the whole shown set), so
+/// preference pairs are built *across* recalls: candidates from positively
+/// rewarded recalls should outrank candidates from negatively rewarded ones.
+fn train_reranker() -> i32 {
+    use std::collections::HashMap;
+    let log_path = std::env::var("MNEMOS_FEEDBACK_LOG")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "./data/helix/feedback.jsonl".to_string());
+    let model_path = std::env::var("MNEMOS_RERANKER_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "./data/helix/reranker.json".to_string());
+    let data = match std::fs::read_to_string(&log_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("engram: error: cannot read feedback log {log_path}: {e}");
+            return 1;
+        }
+    };
+    let mut candidates: HashMap<u64, Vec<Vec<f64>>> = HashMap::new();
+    let mut rewards: HashMap<u64, f64> = HashMap::new();
+    for line in data.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match v.get("kind").and_then(serde_json::Value::as_str) {
+            Some("recall") => {
+                let Some(rid) = v.get("recall_id").and_then(serde_json::Value::as_u64) else {
+                    continue;
+                };
+                let rows: Vec<Vec<f64>> = v
+                    .get("results")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .enumerate()
+                            .map(|(i, r)| reranker_features_from_log(r, i))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                candidates.entry(rid).or_default().extend(rows);
+            }
+            Some("reward") => {
+                if let (Some(rid), Some(rew)) = (
+                    v.get("recall_id").and_then(serde_json::Value::as_u64),
+                    v.get("reward").and_then(serde_json::Value::as_f64),
+                ) {
+                    rewards.insert(rid, rew);
+                }
+            }
+            _ => {}
+        }
+    }
+    const POS: f64 = 0.2;
+    const NEG: f64 = -0.2;
+    let positives: Vec<&Vec<f64>> = candidates
+        .iter()
+        .filter(|(rid, _)| rewards.get(rid).is_some_and(|r| *r > POS))
+        .flat_map(|(_, rows)| rows.iter())
+        .collect();
+    let negatives: Vec<&Vec<f64>> = candidates
+        .iter()
+        .filter(|(rid, _)| rewards.get(rid).is_some_and(|r| *r < NEG))
+        .flat_map(|(_, rows)| rows.iter())
+        .collect();
+    if positives.is_empty() || negatives.is_empty() {
+        eprintln!(
+            "engram: not enough feedback yet (positive recalls={}, negative recalls={}); need both signs",
+            candidates
+                .keys()
+                .filter(|rid| rewards.get(rid).is_some_and(|r| *r > POS))
+                .count(),
+            candidates
+                .keys()
+                .filter(|rid| rewards.get(rid).is_some_and(|r| *r < NEG))
+                .count(),
+        );
+        return 1;
+    }
+    const MAX_PAIRS: usize = 200_000;
+    let mut pairs: Vec<(Vec<f64>, Vec<f64>)> = Vec::new();
+    'outer: for p in &positives {
+        for n in &negatives {
+            pairs.push(((*p).clone(), (*n).clone()));
+            if pairs.len() >= MAX_PAIRS {
+                break 'outer;
+            }
+        }
+    }
+    let mut model = mnemos_reranker::RerankerModel::load(&model_path).unwrap_or_default();
+    model.train_pairwise(&pairs, 0.05, 20);
+    if let Err(e) = model.save(&model_path) {
+        eprintln!("engram: error: cannot save reranker model {model_path}: {e}");
+        return 1;
+    }
+    let out = serde_json::json!({
+        "model": model_path,
+        "pairs": pairs.len(),
+        "positive_candidates": positives.len(),
+        "negative_candidates": negatives.len(),
+        "trained_samples": model.trained_samples,
+        "alpha_env": "MNEMOS_RERANKER_ALPHA (default 0.0 = shadow, base CRR only)",
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+    0
 }
 
 #[tokio::main]

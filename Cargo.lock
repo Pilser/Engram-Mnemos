@@ -2322,6 +2322,7 @@ dependencies = [
  "mnemos-mcp-tools",
  "mnemos-mitosis",
  "mnemos-ml-trait",
+ "mnemos-reranker",
  "mnemos-retrieval",
  "mnemos-stimulation",
  "mnemos-storage",
@@ -2641,6 +2642,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnemos-reranker"
+version = "0.1.0"
+dependencies = [
+ "mnemos-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mnemos-retrieval"
 version = "0.1.0"
 dependencies = [
@@ -2649,6 +2659,7 @@ dependencies = [
  "mnemos-core",
  "mnemos-edge-weights",
  "mnemos-embedding-trait",
+ "mnemos-reranker",
  "mnemos-stimulation",
  "mnemos-storage",
  "mnemos-telemetry",

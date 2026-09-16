@@ -32,6 +32,7 @@ mnemos-mcp-server = { workspace = true }
 mnemos-mcp-tools = { workspace = true }
 mnemos-contradiction = { workspace = true }
 mnemos-mitosis = { workspace = true }
+mnemos-reranker = { workspace = true }
 mnemos-telemetry = { workspace = true }
 mnemos-mcp-protocol = { workspace = true }
 mnemos-mcp-http = { workspace = true }

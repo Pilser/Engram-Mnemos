@@ -9,6 +9,7 @@ mnemos-storage = { path = "../mnemos-storage" }
 mnemos-stimulation = { path = "../mnemos-stimulation" }
 mnemos-edge-weights = { path = "../mnemos-edge-weights" }
 mnemos-embedding-trait = { path = "../mnemos-embedding-trait" }
+mnemos-reranker = { workspace = true }
 mnemos-telemetry = { workspace = true }
 helix-db = { workspace = true }
 serde = { workspace = true }
