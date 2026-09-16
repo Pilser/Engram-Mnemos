@@ -785,6 +785,10 @@ async fn dispatch(command: Command) -> i32 {
             | Command::Consolidate
             | Command::Stats
             | Command::Setup
+            // Status MUST be forwarded: it is read-only and must not open the
+            // embedded DB locally, or it would invalidate the daemon's handle
+            // ("detected newer DB client").
+            | Command::Status
     );
     if forwardable {
         if let Some(code) = try_daemon(&command).await {
