@@ -399,6 +399,12 @@ async fn dispatch_cli_rpc(cli: &Arc<Cli>, body: &[u8]) -> hyper::Response<HttpBo
                 let limit = req.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(5) as usize;
                 match cli.recall(query, limit).await {
                     Ok(results) => {
+                        if results.is_empty() {
+                            return json_response(serde_json::json!({
+                                "ok": true,
+                                "data": {"results": [], "recall_id": null, "message": "I don't know"}
+                            }));
+                        }
                         let recall_id = cli.last_recall_id().await;
                         serde_json::to_value(&serde_json::json!({"results": results, "recall_id": recall_id})).map_err(|e| e.to_string())
                     }

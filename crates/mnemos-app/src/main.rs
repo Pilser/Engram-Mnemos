@@ -353,12 +353,12 @@ fn parse_setup(rest: &[&str]) -> Command {
 /// Agent-focused usage: the 6 memory commands (for `help`/`--help`/`-h` and invalid).
 fn usage() -> &'static str {
     "usage: engram <command> [args]\n\
-     capability: episodic memory with optional sequential story chains (TemporalSequence); every recall must be rewarded via reward (use recall_id from recall)\n\
+     capability: episodic memory with optional sequential story chains (TemporalSequence); every recall must be rewarded via reward (use recall_id from recall); recall answers \"I don't know\" when nothing is relevant\n\
      \n\
      commands:\n\
      \x20 ingest <text...>  store one episodic memory (no sequence needed)\n\
      \x20   optionally sequential: --seq <prev_id> links this engram after <prev_id> via TemporalSequence (use previous ingest's returned id); --seq-pos N groups many engrams at same position N before next (fan-out at level)\n\
-     \x20 recall <query...> [--limit N]  recall top-N memories as JSON (default 5); sequential results show [sequential: pos=N head=...]\n\
+     \x20 recall <query...> [--limit N]  recall top-N memories as JSON (default 5); sequential results show [sequential: pos=N head=...]; prints \"I don't know\" when no hit clears the relevance floor (MNEMOS_RECALL_MIN_SIM, default 0.70)\n\
      \x20   optionally walk chain: --follow-seq <id> start from engram <id> (ignore query), --depth N steps (default 10), --dir up|down|both (default down) to traverse TemporalSequence\n\
      \x20 reward <score -1.0 to 1.0> [--recall-id N | attributions csv]  reward a recall based on relevancy of recalled memories so memory learns (edge weights via Adam) — must reward each recall (1.0 relevant positive, -1.0 irrelevant negative, 0 no-op)\n\
      \x20 consolidate                         run one consolidation cycle\n\
@@ -369,12 +369,12 @@ fn usage() -> &'static str {
 /// Operator usage: all commands (for `--help-all` / `help-all`).
 fn usage_all() -> &'static str {
     "usage: engram <command> [args]\n\
-     capability: episodic memory with optional sequential story chains (TemporalSequence); every recall must be rewarded via reward (use recall_id from recall)\n\
+     capability: episodic memory with optional sequential story chains (TemporalSequence); every recall must be rewarded via reward (use recall_id from recall); recall answers \"I don't know\" when nothing is relevant\n\
      \n\
      commands:\n\
      \x20 ingest <text...>  store one episodic memory (no sequence needed)\n\
      \x20   optionally sequential: --seq <prev_id> links after <prev_id> via TemporalSequence (use previous ingest's returned id); --seq-pos N groups many engrams at same position N before next (fan-out)\n\
-     \x20 recall <query...> [--limit N]  recall top-N memories as JSON (default 5); sequential results show [sequential: pos=N head=...]\n\
+     \x20 recall <query...> [--limit N]  recall top-N memories as JSON (default 5); sequential results show [sequential: pos=N head=...]; prints \"I don't know\" when no hit clears the relevance floor (MNEMOS_RECALL_MIN_SIM, default 0.70)\n\
      \x20   optionally walk chain: --follow-seq <id> start from <id> (ignore query), --depth N steps (default 10), --dir up|down|both (default down) to traverse TemporalSequence\n\
      \x20 reward <score -1.0 to 1.0> [--recall-id N | attributions csv]  reward a recall based on relevancy of recalled memories so memory learns (edge weights via Adam) — must reward each recall (1.0 relevant positive, -1.0 irrelevant negative, 0 no-op)\n\
      \x20 consolidate                         run one consolidation cycle\n\
@@ -549,6 +549,24 @@ async fn try_daemon(command: &Command) -> Option<i32> {
             }
             Command::Reward { .. } => {
                 println!("reward applied (daemon)");
+                Some(0)
+            }
+            Command::Recall { follow_seq: Some(_), .. } => {
+                // Sequential chain walk (not a relevance query).
+                println!("{}", json.get("data").unwrap_or(&serde_json::Value::Null));
+                Some(0)
+            }
+            Command::Recall { .. } => {
+                let data = json.get("data").unwrap_or(&serde_json::Value::Null);
+                let empty = data
+                    .get("results")
+                    .and_then(serde_json::Value::as_array)
+                    .is_none_or(Vec::is_empty);
+                if empty {
+                    println!("I don't know");
+                } else {
+                    println!("{data}");
+                }
                 Some(0)
             }
             _ => {
@@ -825,6 +843,10 @@ async fn dispatch(command: Command) -> i32 {
             } else {
                 match cli.recall(&query, limit).await {
                     Ok(results) => {
+                        if results.is_empty() {
+                            println!("I don't know");
+                            return 0;
+                        }
                         let recall_id = cli.last_recall_id().await;
                         match serde_json::to_string(&serde_json::json!({"results": results, "recall_id": recall_id})) {
                             Ok(json) => {

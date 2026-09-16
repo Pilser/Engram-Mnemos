@@ -195,6 +195,13 @@ impl MnemosMcpTools {
             .recall(&params.query, params.effective_limit())
             .await
             .map_err(internal_error)?;
+        if results.is_empty() {
+            return to_json_string(serde_json::json!({
+                "results": [],
+                "recall_id": serde_json::Value::Null,
+                "message": "I don't know"
+            }));
+        }
         let recall_id = self.cli.last_recall_id().await;
         to_json_string(serde_json::json!({ "results": results, "recall_id": recall_id }))
     }

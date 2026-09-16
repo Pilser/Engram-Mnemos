@@ -60,7 +60,9 @@
 
 use helix_db::dsl::prelude::*;
 use mnemos_core::{EngramCandidate, EngramId, MnemosError, ResonanceResult, Result};
-use mnemos_edge_weights::{EdgeWeights, IDX_RECALLS};
+use mnemos_edge_weights::{
+    EdgeWeights, IDX_CONTRADICTS, IDX_RECALLS, IDX_REINFORCES, IDX_TEMPORAL_SEQ,
+};
 use mnemos_embedding_trait::EmbeddingProvider;
 use mnemos_stimulation::StimulationEngine;
 use mnemos_storage::Storage;
@@ -428,6 +430,39 @@ fn parse_temporal_ids(response: &serde_json::Value, key: &str) -> Vec<EngramId> 
     }
 }
 
+/// Minimum semantic similarity for a recall hit to count as relevant.
+///
+/// Below this the memory is treated as "not known" and the caller answers
+/// `I don't know` instead of returning an off-topic match. Override with
+/// `MNEMOS_RECALL_MIN_SIM` (default `0.70`; `0.0` disables the floor).
+#[must_use]
+pub fn recall_min_similarity() -> f64 {
+    std::env::var("MNEMOS_RECALL_MIN_SIM")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(0.70)
+}
+
+/// Minimum resonance score for a recall hit (secondary floor).
+///
+/// Override with `MNEMOS_RECALL_MIN_SCORE` (default `0.0` = disabled).
+#[must_use]
+pub fn recall_min_score() -> f64 {
+    std::env::var("MNEMOS_RECALL_MIN_SCORE")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| *v >= 0.0)
+        .unwrap_or(0.0)
+}
+
+/// Keep only hits that clear the relevance floors.
+fn apply_relevance_floor(results: &mut Vec<ResonanceResult>) {
+    let min_sim = recall_min_similarity();
+    let min_score = recall_min_score();
+    results.retain(|r| r.semantic_sim >= min_sim && r.resonance_score >= min_score);
+}
+
 /// Single-pass CRR recall pipeline with reward-driven edge-weight learning.
 pub struct RetrievalPipeline {
     storage: Storage,
@@ -467,6 +502,11 @@ impl RetrievalPipeline {
                 }
             }
         }
+        // CRITICAL: the stimulation engine owns its own `EdgeWeights`, and the
+        // wave loop reads weights through `stimulation.transfer`. Push the
+        // persisted/loaded weights into the engine so learning is not dead code.
+        let mut stimulation = stimulation;
+        *stimulation.weights_mut() = loaded.clone();
         Self {
             storage,
             stimulation,
@@ -507,6 +547,13 @@ impl RetrievalPipeline {
                 }
             }
         }
+    }
+
+    /// Push the pipeline's authoritative weights into the stimulation engine
+    /// so the wave loop (`stimulation.transfer`) uses learned values, not the
+    /// stale defaults it was constructed with.
+    fn sync_weights(&mut self) {
+        *self.stimulation.weights_mut() = self.edge_weights.clone();
     }
 
     /// Recall top-`limit` memories for `query`.
@@ -600,7 +647,8 @@ impl RetrievalPipeline {
             &alignments,
         );
 
-        // Step 6: sort highest-first, take top N.
+        // Step 6: drop off-topic hits (relevance floor), sort, take top N.
+        apply_relevance_floor(&mut results);
         results.sort_by(|a, b| {
             b.resonance_score
                 .partial_cmp(&a.resonance_score)
@@ -689,6 +737,11 @@ impl RetrievalPipeline {
             .map(|r| r.engram_id)
             .collect();
 
+        // Per-edge-label credit: how much activation each traversed label
+        // actually contributed. Fed back to `reward` so those weights learn
+        // (previously only IDX_RECALLS ever received attribution).
+        let mut label_credit: HashMap<usize, (f64, usize)> = HashMap::new();
+
         for _ in 0..self.stimulation.config().max_iterations {
             let mut next_wave: Vec<(u64, f64)> = Vec::new();
             for &engram_id in &wave_ids {
@@ -698,9 +751,9 @@ impl RetrievalPipeline {
                 }
                 // Spread via engram->engram edges (Reinforces, TemporalSequence, Contradicts).
                 for (label, idx) in [
-                    ("Reinforces", mnemos_edge_weights::IDX_REINFORCES),
-                    ("TemporalSequence", mnemos_edge_weights::IDX_TEMPORAL_SEQ),
-                    ("Contradicts", mnemos_edge_weights::IDX_CONTRADICTS),
+                    ("Reinforces", IDX_REINFORCES),
+                    ("TemporalSequence", IDX_TEMPORAL_SEQ),
+                    ("Contradicts", IDX_CONTRADICTS),
                 ] {
                     let neighbors = match self
                         .stimulation
@@ -725,6 +778,10 @@ impl RetrievalPipeline {
                         let transferred = self.stimulation.transfer(idx, base_act);
                         let decayed = StimulationEngine::apply_decay(transferred, gamma);
                         if decayed > tau {
+                            // Record this label's contribution for learning.
+                            let entry = label_credit.entry(idx).or_insert((0.0, 0));
+                            entry.0 += decayed.abs();
+                            entry.1 += 1;
                             next_wave.push((nid, decayed));
                         }
                     }
@@ -807,7 +864,26 @@ impl RetrievalPipeline {
             true,
             &format!("added={wave_added} skipped={wave_skipped}"),
         );
-        // Resort and truncate to limit.
+
+        // Fold per-label wave credit into the seed attributions, then rewrite
+        // the ledger entry for this recall so `reward` updates EVERY edge type
+        // the recall actually traversed (not just IDX_RECALLS).
+        let mut combined = self.last_attributions.clone();
+        if combined.len() < 8 {
+            combined.resize(8, 0.0);
+        }
+        for (idx, (sum, count)) in &label_credit {
+            if *idx < combined.len() && *count > 0 {
+                combined[*idx] = sum / (*count as f64);
+            }
+        }
+        self.last_attributions.clone_from(&combined);
+        if let Some(id) = self.last_recall_id() {
+            self.ledger.insert(id, combined);
+        }
+
+        // Relevance floor, resort and truncate to limit.
+        apply_relevance_floor(&mut seed_results);
         seed_results.sort_by(|a, b| {
             b.resonance_score
                 .partial_cmp(&a.resonance_score)
@@ -835,6 +911,7 @@ impl RetrievalPipeline {
             self.edge_weights.adam_update(attributions, reward);
             self.last_attributions.clone_from(&attributions.to_vec());
         }
+        self.sync_weights();
         self.persist_weights();
         mnemos_telemetry::global().record_weights(serde_json::to_value(&self.edge_weights).unwrap_or_default());
         Ok(())
@@ -857,6 +934,7 @@ impl RetrievalPipeline {
         };
         self.edge_weights.adam_update(&attributions, score);
         self.last_attributions.clone_from(&attributions);
+        self.sync_weights();
         self.persist_weights();
         mnemos_telemetry::global().record_weights(serde_json::to_value(&self.edge_weights).unwrap_or_default());
         mnemos_telemetry::global().record(

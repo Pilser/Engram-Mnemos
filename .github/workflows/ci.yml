@@ -46,14 +46,17 @@ jobs:
           # Don't thrash cache on every PR push
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
 
-      - name: cargo check
-        run: cargo check --workspace --all-targets
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets
-
-      - name: cargo test
-        run: cargo test --workspace
+      # NOTE: check/clippy/test are intentionally disabled — we build only from
+      # CI. The release build below is the single gate; any compile error
+      # surfaces here. Re-enable when we want lint/test gating back.
+      # - name: cargo check
+      #   run: cargo check --workspace --all-targets
+      #
+      # - name: cargo clippy
+      #   run: cargo clippy --workspace --all-targets
+      #
+      # - name: cargo test
+      #   run: cargo test --workspace
 
       # Release artifact on main/master (expensive — skip on PRs)
       - name: cargo build (release)

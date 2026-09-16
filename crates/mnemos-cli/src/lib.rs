@@ -367,7 +367,12 @@ impl Cli {
     /// wraps exactly one call site).
     async fn recall_protocol_inner(&self, query: &str, limit: usize) -> Result<String> {
         let oversampled = self.recall(query, limit.saturating_mul(2)).await?;
-        let top = oversampled.into_iter().take(limit);
+        let top: Vec<_> = oversampled.into_iter().take(limit).collect();
+        // No memory clears the relevance floor: answer honestly instead of
+        // returning an empty string.
+        if top.is_empty() {
+            return Ok("I don't know".to_string());
+        }
         let mut out = String::new();
         for r in top {
             let snippet: String = r.episode_raw.chars().take(60).collect();

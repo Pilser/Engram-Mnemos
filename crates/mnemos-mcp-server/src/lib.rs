@@ -333,7 +333,11 @@ impl MnemosServer {
                 } else {
                     let (query, limit) = recall_args(&params)?;
                     let results = self.cli.recall(query, limit).await.map_err(internal)?;
-                    serde_json::json!({ "results": results })
+                    if results.is_empty() {
+                        serde_json::json!({ "results": [], "message": "I don't know" })
+                    } else {
+                        serde_json::json!({ "results": results })
+                    }
                 }
             }
             Command::Reward => {
