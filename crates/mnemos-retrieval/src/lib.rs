@@ -599,8 +599,6 @@ pub struct RetrievalPipeline {
     last_query_embedding: Vec<f32>,
     /// Optional learned reranker (Option B). `None` = base CRR only.
     reranker: Option<mnemos_reranker::RerankerModel>,
-    /// Blend weight for the reranker (`MNEMOS_RERANKER_ALPHA`, default `0.0`).
-    reranker_alpha: f64,
     /// mtime of the loaded model file (hot-reload detection, no restart).
     reranker_mtime: Option<std::time::SystemTime>,
     /// Feature vectors of the latest recall's shown candidates (online tuning).
@@ -651,7 +649,6 @@ impl RetrievalPipeline {
             last_engram_ids: Vec::new(),
             last_query_embedding: Vec::new(),
             reranker,
-            reranker_alpha: Self::reranker_alpha(),
             reranker_mtime,
             last_features: Vec::new(),
             ledger: std::collections::HashMap::new(),
@@ -731,7 +728,6 @@ impl RetrievalPipeline {
                 if let Some(model) = mnemos_reranker::RerankerModel::load(&Self::reranker_model_path()) {
                     self.reranker = Some(model);
                     self.reranker_mtime = Some(mtime);
-                    self.reranker_alpha = Self::reranker_alpha();
                     mnemos_telemetry::global().record(
                         "mnemos-retrieval",
                         "reranker.reload",
@@ -756,6 +752,8 @@ impl RetrievalPipeline {
         for f in features {
             model.online_update(f, reward, lr);
         }
+        // One reward event per reward call (drives the auto-alpha ramp).
+        model.record_reward();
         // Persist to the LOCAL path so the seed stays pristine.
         let _ = model.save(&Self::reranker_model_path());
         self.reranker = Some(model);
@@ -782,34 +780,46 @@ impl RetrievalPipeline {
             .unwrap_or(0.02)
     }
 
-    /// Blend weight for the reranker (`MNEMOS_RERANKER_ALPHA`, default `0.0`).
+    /// Resolve the blend alpha for a model with `reward_events` observations.
     ///
-    /// `0.0` keeps pure CRR (Option A) — the safe default until a model is
-    /// validated. `1.0` fully trusts the reranker.
-    fn reranker_alpha() -> f64 {
-        std::env::var("MNEMOS_RERANKER_ALPHA")
+    /// Default mode is `auto`: it ramps `0.0 → max_alpha` as reward events
+    /// accumulate (`MNEMOS_RERANKER_MIN_PAIRS`, default 500), so the agent
+    /// never has to manage it. A numeric `MNEMOS_RERANKER_ALPHA` pins it.
+    fn reranker_alpha_for(reward_events: u64) -> f64 {
+        let raw = std::env::var("MNEMOS_RERANKER_ALPHA").ok();
+        let min_pairs = std::env::var("MNEMOS_RERANKER_MIN_PAIRS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(500);
+        let max_alpha = std::env::var("MNEMOS_RERANKER_MAX_ALPHA")
             .ok()
             .and_then(|s| s.trim().parse::<f64>().ok())
             .filter(|v| (0.0..=1.0).contains(v))
-            .unwrap_or(0.0)
+            .unwrap_or(0.5);
+        mnemos_reranker::RerankerModel::resolve_alpha(
+            raw.as_deref(),
+            reward_events,
+            min_pairs,
+            max_alpha,
+        )
     }
 
     /// Apply the learned reranker blend to scored results (in place).
     ///
-    /// Neutral when no model is loaded or `alpha == 0.0`, so base CRR is
-    /// unaffected until a model is explicitly enabled.
+    /// Neutral when no model is loaded or the resolved alpha is `0.0`, so base
+    /// CRR is unaffected until enough feedback has accumulated.
     fn apply_reranker(&self, results: &mut [ResonanceResult]) {
         let Some(model) = &self.reranker else {
             return;
         };
-        if self.reranker_alpha <= 0.0 {
+        let alpha = Self::reranker_alpha_for(model.reward_events);
+        if alpha <= 0.0 {
             return;
         }
         for (position, r) in results.iter_mut().enumerate() {
             let features = mnemos_reranker::features_from_result(r, position);
             let p = model.score(&features);
-            r.resonance_score =
-                mnemos_reranker::blend(r.resonance_score, p, self.reranker_alpha);
+            r.resonance_score = mnemos_reranker::blend(r.resonance_score, p, alpha);
         }
     }
 

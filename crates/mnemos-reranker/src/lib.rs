@@ -64,9 +64,12 @@ pub struct RerankerModel {
     /// Format version.
     #[serde(default = "default_version")]
     pub version: u32,
-    /// Number of preference pairs seen during training.
+    /// Number of preference pairs seen during batch training.
     #[serde(default)]
     pub trained_samples: u64,
+    /// Number of reward events applied online (drives the auto-alpha ramp).
+    #[serde(default)]
+    pub reward_events: u64,
     /// Weights in [`FEATURE_NAMES`] order.
     pub weights: Vec<f64>,
     /// Bias term.
@@ -83,6 +86,7 @@ impl Default for RerankerModel {
         Self {
             version: default_version(),
             trained_samples: 0,
+            reward_events: 0,
             weights: vec![0.0; FEATURE_DIM],
             bias: 0.0,
         }
@@ -109,8 +113,36 @@ impl RerankerModel {
         Self {
             version: default_version(),
             trained_samples: 0,
+            reward_events: 0,
             weights: vec![3.0, 0.5, 0.0, 0.5, 0.5, 2.0, 1.0, 1.0, -0.2],
             bias: -3.0,
+        }
+    }
+
+    /// Record one reward event (once per reward, not per candidate).
+    pub fn record_reward(&mut self) {
+        self.reward_events = self.reward_events.saturating_add(1);
+    }
+
+    /// Resolve the blend alpha.
+    ///
+    /// `raw = "auto"` (or unset) ramps linearly with reward events up to
+    /// `max_alpha` at `min_pairs` events, so the system tunes itself and the
+    /// agent never manages it. A numeric `raw` is a fixed override.
+    #[must_use]
+    pub fn resolve_alpha(raw: Option<&str>, reward_events: u64, min_pairs: u64, max_alpha: f64) -> f64 {
+        let mode = raw.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("auto");
+        if mode.eq_ignore_ascii_case("auto") {
+            if min_pairs == 0 {
+                return max_alpha.clamp(0.0, 1.0);
+            }
+            let progress = (reward_events as f64) / (min_pairs as f64);
+            progress.clamp(0.0, 1.0) * max_alpha.clamp(0.0, 1.0)
+        } else {
+            mode.parse::<f64>()
+                .ok()
+                .filter(|v| (0.0..=1.0).contains(v))
+                .unwrap_or(0.0)
         }
     }
 
@@ -128,7 +160,6 @@ impl RerankerModel {
             *w = w.clamp(-10.0, 10.0);
         }
         self.bias = (self.bias + lr * grad).clamp(-20.0, 20.0);
-        self.trained_samples = self.trained_samples.saturating_add(1);
     }
 
     /// Relevance probability in `(0, 1)`.

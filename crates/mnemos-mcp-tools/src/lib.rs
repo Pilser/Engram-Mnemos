@@ -46,6 +46,50 @@ fn internal_error(err: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(err.to_string(), None)
 }
 
+/// Compact learning-state summary read from the local reranker model file.
+fn learning_summary() -> serde_json::Value {
+    let path = std::env::var("MNEMOS_RERANKER_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "./data/helix/reranker.json".to_string());
+    let model = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok());
+    let (state, reward_events) = match &model {
+        Some(m) => (
+            "local",
+            m.get("reward_events")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        ),
+        None => ("seed", 0),
+    };
+    let min_pairs = std::env::var("MNEMOS_RERANKER_MIN_PAIRS")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+        .unwrap_or(500.0);
+    let max_alpha = std::env::var("MNEMOS_RERANKER_MAX_ALPHA")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(0.5);
+    let raw = std::env::var("MNEMOS_RERANKER_ALPHA").ok();
+    let mode = raw.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("auto");
+    let alpha = if mode.eq_ignore_ascii_case("auto") {
+        ((reward_events as f64) / min_pairs).clamp(0.0, 1.0) * max_alpha
+    } else {
+        mode.parse::<f64>().ok().filter(|v| (0.0..=1.0).contains(v)).unwrap_or(0.0)
+    };
+    serde_json::json!({
+        "model": state,
+        "reward_events": reward_events,
+        "alpha": (alpha * 1000.0).round() / 1000.0,
+        "alpha_mode": mode,
+        "state": if alpha <= 0.0 { "shadow" } else { "active" },
+    })
+}
+
 /// Serialize a payload to the JSON string returned by every tool.
 ///
 /// # Errors
@@ -256,7 +300,12 @@ impl MnemosMcpTools {
     )]
     pub async fn status(&self) -> Result<String, ErrorData> {
         let stats = self.cli.stats().await.map_err(internal_error)?;
-        to_json_string(serde_json::json!({ "stats": stats, "embedding": {"note": "use shell engram status for live ping"}, "llm": {"note": "use shell engram status for live ping"} }))
+        to_json_string(serde_json::json!({
+            "stats": stats,
+            "learning": learning_summary(),
+            "embedding": {"note": "use shell engram status for live ping"},
+            "llm": {"note": "use shell engram status for live ping"},
+        }))
     }
 
     /// Get usage help for a tool (or all tools when `tool` is omitted).

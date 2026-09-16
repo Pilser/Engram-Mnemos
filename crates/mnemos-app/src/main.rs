@@ -356,7 +356,7 @@ fn parse_setup(rest: &[&str]) -> Command {
 /// Agent-focused usage: the 6 memory commands (for `help`/`--help`/`-h` and invalid).
 fn usage() -> &'static str {
     "usage: engram <command> [args]\n\
-     capability: episodic memory with optional sequential story chains (TemporalSequence); every recall must be rewarded via reward (use recall_id from recall); recall answers \"I don't know\" when nothing is relevant\n\
+     capability: episodic memory with optional sequential story chains (TemporalSequence); every recall must be rewarded via reward (use recall_id from recall); recall answers \"I don't know\" when nothing is relevant; learning is automatic (just recall+reward) — run status to see its state\n\
      \n\
      commands:\n\
      \x20 ingest <text...>  store one episodic memory (no sequence needed)\n\
@@ -366,7 +366,7 @@ fn usage() -> &'static str {
      \x20 reward <score -1.0 to 1.0> [--recall-id N | attributions csv]  reward a recall based on relevancy of recalled memories so memory learns (edge weights via Adam) — must reward each recall (1.0 relevant positive, -1.0 irrelevant negative, 0 no-op)\n\
      \x20 consolidate                         run one consolidation cycle\n\
      \x20 stats                               print memory stats as JSON\n\
-     \x20 status                              check embedding and LLM reachability + stats"
+     \x20 status                              check embedding + LLM reachability, memory stats, and learning state (model seed|local, feedback reward_events, alpha, shadow|active)"
 }
 
 /// Operator usage: all commands (for `--help-all` / `help-all`).
@@ -383,8 +383,8 @@ fn usage_all() -> &'static str {
      \x20 consolidate                         run one consolidation cycle\n\
      \x20 setup                               create Engram vector index (dim from env EMBEDDING_DIM)\n\
      \x20 stats                               print memory stats as JSON\n\
-     \x20 status                              check embedding and LLM reachability + stats\n\
-     \x20 train-reranker                      train the learned reranker from the feedback log (operator; then set MNEMOS_RERANKER_ALPHA>0)\n\
+     \x20 status                              check embedding + LLM reachability, memory stats, and learning state (model seed|local, feedback reward_events, alpha, shadow|active)\n\
+     \x20 train-reranker                      batch-train the learned reranker from the feedback log (operator; optional — online learning is automatic)\n\
      \x20 mcp-server                           serve the full MCP server over stdio\n\
      \x20 mcp-tools                            serve the MCP tool subset over stdio\n\
      \x20 serve (daemon, up)                   persistent daemon: HTTP /mcp*, /cli, /health, /telemetry* + background tasks (stays in terminal)\n\
@@ -964,7 +964,12 @@ async fn dispatch(command: Command) -> i32 {
                 }
                 Err(e) => serde_json::json!({"ok": false, "error": e}),
             };
-            let out = serde_json::json!({"storage": storage_json, "embedding": embedding_json, "llm": llm_json});
+            let out = serde_json::json!({
+                "storage": storage_json,
+                "embedding": embedding_json,
+                "llm": llm_json,
+                "learning": learning_status(),
+            });
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             0
         },
@@ -998,6 +1003,60 @@ async fn dispatch(command: Command) -> i32 {
             2
         }
     }
+}
+
+/// Learning-state summary for the `status` command (agent-visible).
+///
+/// Reports how much feedback has accumulated, whether the model is the shipped
+/// seed or a locally-trained one, and the currently resolved blend alpha, so an
+/// agent can *observe* learning without having to manage it.
+fn learning_status() -> serde_json::Value {
+    let model_path = std::env::var("MNEMOS_RERANKER_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "./data/helix/reranker.json".to_string());
+    let local = mnemos_reranker::RerankerModel::load(&model_path);
+    let (model_state, trained_samples, reward_events) = match &local {
+        Some(m) => ("local", m.trained_samples, m.reward_events),
+        None => ("seed", 0, 0),
+    };
+    let raw = std::env::var("MNEMOS_RERANKER_ALPHA").ok();
+    let min_pairs = std::env::var("MNEMOS_RERANKER_MIN_PAIRS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(500);
+    let max_alpha = std::env::var("MNEMOS_RERANKER_MAX_ALPHA")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(0.5);
+    let alpha = mnemos_reranker::RerankerModel::resolve_alpha(
+        raw.as_deref(),
+        reward_events,
+        min_pairs,
+        max_alpha,
+    );
+    let online = match std::env::var("MNEMOS_RERANKER_ONLINE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        None | Some("") => true,
+        Some(v) => !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+    };
+    serde_json::json!({
+        "model": model_state,
+        "trained_samples": trained_samples,
+        "reward_events": reward_events,
+        "alpha": (alpha * 1000.0).round() / 1000.0,
+        "alpha_mode": raw.unwrap_or_else(|| "auto".to_string()),
+        "min_pairs_for_full_alpha": min_pairs,
+        "online_finetuning": online,
+        "state": if alpha <= 0.0 { "shadow" } else { "active" },
+    })
 }
 
 /// Feature vector for one logged candidate (must match
