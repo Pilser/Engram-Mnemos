@@ -92,6 +92,7 @@ fn search_engrams_full(query_embedding: Vec<f32>, limit: i64) {
                     "engram_type",
                     "compression_level",
                     "contradiction_flag",
+                    "reward_score",
                 ])),
         )
         .returning(["candidates"])
@@ -134,6 +135,7 @@ fn get_engram_full(engram_id: i64) {
                 "engram_type",
                 "compression_level",
                 "contradiction_flag",
+                "reward_score",
             ])),
         )
         .returning(["engram"])
@@ -149,6 +151,32 @@ fn set_engram_activation(engram_id: i64, activation_count: i64) {
             "updated",
             g().n(NodeRef::param("engram_id"))
                 .set_property("activation_count", activation_count),
+        )
+        .returning(["updated"])
+}
+
+/// Read back one engram's learned `reward_score`.
+#[query]
+fn get_engram_reward(engram_id: i64) {
+    let _ = &engram_id;
+    read_batch()
+        .var_as(
+            "engram",
+            g().n(NodeRef::param("engram_id"))
+                .value_map(Some(vec!["$id", "reward_score"])),
+        )
+        .returning(["engram"])
+}
+
+/// Write back one engram's learned `reward_score`.
+#[query]
+fn set_engram_reward(engram_id: i64, reward_score: f64) {
+    let _ = &engram_id;
+    write_batch()
+        .var_as(
+            "updated",
+            g().n(NodeRef::param("engram_id"))
+                .set_property("reward_score", reward_score),
         )
         .returning(["updated"])
 }
@@ -245,8 +273,16 @@ pub fn compute_resonance_with_alignment(
             // Factor 5: contradiction penalty.
             let contradiction_factor = if c.contradiction_flag { 0.5 } else { 1.0 };
 
-            let resonance =
-                semantic * recency * emotional_boost * identity_alignment * contradiction_factor;
+            // Factor 6: learned per-engram reward (neutral at 0.0; bounded so
+            // one memory can neither dominate nor be erased).
+            let reward_factor = (1.0 + c.reward_score).clamp(0.25, 4.0);
+
+            let resonance = semantic
+                * recency
+                * emotional_boost
+                * identity_alignment
+                * contradiction_factor
+                * reward_factor;
 
             ResonanceResult {
                 engram_id: c.id,
@@ -257,6 +293,7 @@ pub fn compute_resonance_with_alignment(
                 identity_alignment,
                 semantic_sim: semantic,
                 recency_weight: recency,
+                reward_score: c.reward_score,
             }
         })
         .collect::<Vec<_>>();
@@ -463,6 +500,17 @@ fn apply_relevance_floor(results: &mut Vec<ResonanceResult>) {
     results.retain(|r| r.semantic_sim >= min_sim && r.resonance_score >= min_score);
 }
 
+/// One recall's ledger entry: edge attributions plus the engrams it surfaced.
+///
+/// `engram_ids` is what makes reward learning per-memory: on reward each
+/// surfaced engram's `reward_score` moves toward the reward sign, and CRR
+/// uses `reward_score` as a factor, so rewarded memories rank higher next time.
+#[derive(Debug, Clone)]
+struct RecallLedger {
+    attributions: Vec<f64>,
+    engram_ids: Vec<EngramId>,
+}
+
 /// Single-pass CRR recall pipeline with reward-driven edge-weight learning.
 pub struct RetrievalPipeline {
     storage: Storage,
@@ -474,10 +522,12 @@ pub struct RetrievalPipeline {
     /// `Engram.embedding`, i.e. the Recalls pathway). Used as the fallback
     /// attribution source by [`Self::reward`].
     last_attributions: Vec<f64>,
+    /// Engrams surfaced by the latest recall (fallback per-engram reward target).
+    last_engram_ids: Vec<EngramId>,
     /// Recall ledger for parallel-safe reward (always on).
-    /// `recall_id → attributions` isolated per recall; `next_recall_id` is
+    /// `recall_id → RecallLedger` isolated per recall; `next_recall_id` is
     /// monotonic. Replaces the old single `last_attributions` fallback.
-    ledger: std::collections::HashMap<u64, Vec<f64>>,
+    ledger: std::collections::HashMap<u64, RecallLedger>,
     next_recall_id: u64,
 }
 
@@ -513,6 +563,7 @@ impl RetrievalPipeline {
             edge_weights: loaded,
             embedder,
             last_attributions: Vec::new(),
+            last_engram_ids: Vec::new(),
             ledger: std::collections::HashMap::new(),
             next_recall_id: 1,
         }
@@ -678,12 +729,21 @@ impl RetrievalPipeline {
         if count > 0.0 {
             attr[IDX_RECALLS] = total / count;
         }
+        let engram_ids: Vec<EngramId> = results.iter().map(|r| r.engram_id).collect();
         self.last_attributions.clone_from(&attr);
-        // Opt-in ledger: isolate per-recall attributions for parallel-safe reward.
+        self.last_engram_ids.clone_from(&engram_ids);
+        // Opt-in ledger: isolate per-recall attributions + surfaced engrams
+        // for parallel-safe, per-memory reward.
         if Self::ledger_enabled() {
             let id = self.next_recall_id;
             self.next_recall_id = self.next_recall_id.wrapping_add(1);
-            self.ledger.insert(id, attr);
+            self.ledger.insert(
+                id,
+                RecallLedger {
+                    attributions: attr,
+                    engram_ids,
+                },
+            );
             // Keep ledger bounded (evict oldest when > 1024).
             if self.ledger.len() > 1024 {
                 if let Some(k) = self.ledger.keys().next().copied() {
@@ -855,6 +915,7 @@ impl RetrievalPipeline {
                 identity_alignment,
                 semantic_sim: 1.0 - candidate.distance,
                 recency_weight: recency,
+                reward_score: candidate.reward_score,
             });
             wave_added += 1;
         }
@@ -878,8 +939,16 @@ impl RetrievalPipeline {
             }
         }
         self.last_attributions.clone_from(&combined);
+        let engram_ids: Vec<EngramId> = seed_results.iter().map(|r| r.engram_id).collect();
+        self.last_engram_ids.clone_from(&engram_ids);
         if let Some(id) = self.last_recall_id() {
-            self.ledger.insert(id, combined);
+            self.ledger.insert(
+                id,
+                RecallLedger {
+                    attributions: combined,
+                    engram_ids,
+                },
+            );
         }
 
         // Relevance floor, resort and truncate to limit.
@@ -903,7 +972,7 @@ impl RetrievalPipeline {
     ///
     /// Currently infallible (returns `Result` for forward compatibility with
     /// fallible weight stores).
-    pub fn reward(&mut self, attributions: &[f64], reward: f64) -> Result<()> {
+    pub async fn reward(&mut self, attributions: &[f64], reward: f64) -> Result<()> {
         if attributions.is_empty() {
             let last = self.last_attributions.clone();
             self.edge_weights.adam_update(&last, reward);
@@ -913,29 +982,72 @@ impl RetrievalPipeline {
         }
         self.sync_weights();
         self.persist_weights();
+        // Per-memory learning: move each surfaced engram's reward_score.
+        let targets = self.last_engram_ids.clone();
+        self.apply_engram_reward(&targets, reward).await;
         mnemos_telemetry::global().record_weights(serde_json::to_value(&self.edge_weights).unwrap_or_default());
         Ok(())
     }
 
+    /// Move each surfaced engram's learned `reward_score` toward the reward
+    /// sign. Best-effort: read/write failures are swallowed (recall must not
+    /// fail because reward bookkeeping did).
+    async fn apply_engram_reward(&self, engram_ids: &[EngramId], reward: f64) {
+        const ENGRAM_REWARD_LR: f64 = 0.2;
+        for id in engram_ids {
+            let node_param = i64::try_from(*id).unwrap_or(i64::MAX);
+            let Ok(read_req) = get_engram_reward(node_param) else {
+                continue;
+            };
+            let Ok(current) = self
+                .storage
+                .client()
+                .query::<serde_json::Value>(read_req)
+                .send()
+                .await
+            else {
+                continue;
+            };
+            let cur = current
+                .get("engram")
+                .and_then(|v| v.get(0))
+                .and_then(|r| r.get("reward_score"))
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let next = (cur + ENGRAM_REWARD_LR * reward).clamp(-1.0, 1.0);
+            let Ok(write_req) = set_engram_reward(node_param, next) else {
+                continue;
+            };
+            let _ = self
+                .storage
+                .client()
+                .query::<serde_json::Value>(write_req)
+                .send()
+                .await;
+        }
+    }
+
     /// Parallel-safe reward: `recall_id` must be from a prior `recall`.
     /// Falls back to `reward([], score)` when the id is missing (telemetry records the miss).
-    pub fn reward_with_id(&mut self, recall_id: u64, score: f64) -> Result<()> {
+    pub async fn reward_with_id(&mut self, recall_id: u64, score: f64) -> Result<()> {
         if !Self::ledger_enabled() {
-            return self.reward(&[], score);
+            return self.reward(&[], score).await;
         }
-        let Some(attributions) = self.ledger.remove(&recall_id) else {
+        let Some(entry) = self.ledger.remove(&recall_id) else {
             mnemos_telemetry::global().record(
                 "mnemos-retrieval",
                 "reward.ledger_miss",
                 false,
                 &format!("recall_id={recall_id} not found (expired or already rewarded)"),
             );
-            return self.reward(&[], score);
+            return self.reward(&[], score).await;
         };
-        self.edge_weights.adam_update(&attributions, score);
-        self.last_attributions.clone_from(&attributions);
+        self.edge_weights.adam_update(&entry.attributions, score);
+        self.last_attributions.clone_from(&entry.attributions);
         self.sync_weights();
         self.persist_weights();
+        // Per-memory learning for exactly the engrams this recall surfaced.
+        self.apply_engram_reward(&entry.engram_ids, score).await;
         mnemos_telemetry::global().record_weights(serde_json::to_value(&self.edge_weights).unwrap_or_default());
         mnemos_telemetry::global().record(
             "mnemos-retrieval",

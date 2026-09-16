@@ -110,6 +110,10 @@ pub struct EngramCandidate {
     pub compression_level: i64,
     #[serde(default)]
     pub contradiction_flag: bool,
+    /// Learned per-engram reward signal (updated by `reward`). Positive means
+    /// the memory proved relevant when recalled; negative means it did not.
+    #[serde(default)]
+    pub reward_score: f64,
     #[serde(rename = "$distance", default)]
     pub distance: f64,
 }
@@ -125,6 +129,9 @@ pub struct ResonanceResult {
     pub identity_alignment: f64,
     pub semantic_sim: f64,
     pub recency_weight: f64,
+    /// Learned per-engram reward signal applied as a CRR factor.
+    #[serde(default)]
+    pub reward_score: f64,
 }
 
 /// Aggregate counts for CLI stats / MCP tools.

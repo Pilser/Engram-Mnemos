@@ -422,7 +422,7 @@ impl Cli {
     /// Returns [`MnemosError`] for forward compatibility with fallible
     /// weight stores (currently infallible).
     pub async fn reward(&self, attributions: &[f64], score: f64) -> Result<()> {
-        self.retrieval.lock().await.reward(attributions, score)
+        self.retrieval.lock().await.reward(attributions, score).await
     }
 
     /// Parallel-safe reward via ledger `recall_id` (always on).
@@ -430,7 +430,7 @@ impl Cli {
     /// The `recall_id` must be from a prior `recall`/`recall_protocol` in this
     /// process. Falls back to `reward([], score)` when the id is unknown.
     pub async fn reward_with_id(&self, recall_id: u64, score: f64) -> Result<()> {
-        self.retrieval.lock().await.reward_with_id(recall_id, score)
+        self.retrieval.lock().await.reward_with_id(recall_id, score).await
     }
 
     /// Last ledger recall id, if at least one `recall` ran (always on now).
