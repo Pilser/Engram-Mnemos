@@ -21,6 +21,8 @@
 !examples/**
 !docs/
 !docs/**
+!models/
+!models/**
 !.env.example
 !README.md
 !LICENSE

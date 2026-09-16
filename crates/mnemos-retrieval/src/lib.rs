@@ -567,6 +567,8 @@ struct RecallLedger {
     engram_ids: Vec<EngramId>,
     /// Query embedding of that recall (reward context for gating).
     query_embedding: Vec<f32>,
+    /// Feature vectors of the surfaced engrams (online reranker fine-tuning).
+    features: Vec<Vec<f64>>,
 }
 
 /// Path of the JSONL feedback log (reranker training data).
@@ -599,6 +601,10 @@ pub struct RetrievalPipeline {
     reranker: Option<mnemos_reranker::RerankerModel>,
     /// Blend weight for the reranker (`MNEMOS_RERANKER_ALPHA`, default `0.0`).
     reranker_alpha: f64,
+    /// mtime of the loaded model file (hot-reload detection, no restart).
+    reranker_mtime: Option<std::time::SystemTime>,
+    /// Feature vectors of the latest recall's shown candidates (online tuning).
+    last_features: Vec<Vec<f64>>,
     /// Recall ledger for parallel-safe reward (always on).
     /// `recall_id → RecallLedger` isolated per recall; `next_recall_id` is
     /// monotonic. Replaces the old single `last_attributions` fallback.
@@ -632,6 +638,10 @@ impl RetrievalPipeline {
         // persisted/loaded weights into the engine so learning is not dead code.
         let mut stimulation = stimulation;
         *stimulation.weights_mut() = loaded.clone();
+        let (reranker, reranker_mtime) = match Self::load_reranker() {
+            Some((model, mtime)) => (Some(model), Some(mtime)),
+            None => (None, None),
+        };
         Self {
             storage,
             stimulation,
@@ -640,8 +650,10 @@ impl RetrievalPipeline {
             last_attributions: Vec::new(),
             last_engram_ids: Vec::new(),
             last_query_embedding: Vec::new(),
-            reranker: Self::load_reranker(),
+            reranker,
             reranker_alpha: Self::reranker_alpha(),
+            reranker_mtime,
+            last_features: Vec::new(),
             ledger: std::collections::HashMap::new(),
             next_recall_id: 1,
         }
@@ -660,7 +672,7 @@ impl RetrievalPipeline {
         Some(p)
     }
 
-    /// Path of the learned reranker model (`MNEMOS_RERANKER_MODEL`).
+    /// Path of the locally-trained reranker model (`MNEMOS_RERANKER_MODEL`).
     fn reranker_model_path() -> String {
         std::env::var("MNEMOS_RERANKER_MODEL")
             .ok()
@@ -668,9 +680,106 @@ impl RetrievalPipeline {
             .unwrap_or_else(|| "./data/helix/reranker.json".to_string())
     }
 
-    /// Load the reranker model if present (shadow/disabled when absent).
-    fn load_reranker() -> Option<mnemos_reranker::RerankerModel> {
-        mnemos_reranker::RerankerModel::load(&Self::reranker_model_path())
+    /// Path of the shipped seed model (`MNEMOS_RERANKER_SEED`), used until a
+    /// local model exists. Also probed next to the binary.
+    fn reranker_seed_paths() -> Vec<String> {
+        let mut paths = Vec::new();
+        if let Ok(p) = std::env::var("MNEMOS_RERANKER_SEED") {
+            if !p.trim().is_empty() {
+                paths.push(p);
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                paths.push(dir.join("models/reranker-seed.json").to_string_lossy().to_string());
+            }
+        }
+        paths.push("./models/reranker-seed.json".to_string());
+        paths
+    }
+
+    /// Load the local model, else the shipped seed. Returns the model plus the
+    /// source file's mtime (for hot-reload detection).
+    fn load_reranker() -> Option<(mnemos_reranker::RerankerModel, std::time::SystemTime)> {
+        let local = Self::reranker_model_path();
+        if let Some(model) = mnemos_reranker::RerankerModel::load(&local) {
+            let mtime = std::fs::metadata(&local)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            return Some((model, mtime));
+        }
+        for seed in Self::reranker_seed_paths() {
+            if let Some(model) = mnemos_reranker::RerankerModel::load(&seed) {
+                let mtime = std::fs::metadata(&seed)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                return Some((model, mtime));
+            }
+        }
+        None
+    }
+
+    /// Hot-reload the reranker when its file changes on disk (e.g. after a
+    /// `train-reranker` run) — no daemon restart needed.
+    fn maybe_reload_reranker(&mut self) {
+        let current = std::fs::metadata(Self::reranker_model_path())
+            .and_then(|m| m.modified())
+            .ok();
+        // Only reload when the local file exists and its mtime changed.
+        if let Some(mtime) = current {
+            if Some(mtime) != self.reranker_mtime {
+                if let Some(model) = mnemos_reranker::RerankerModel::load(&Self::reranker_model_path()) {
+                    self.reranker = Some(model);
+                    self.reranker_mtime = Some(mtime);
+                    self.reranker_alpha = Self::reranker_alpha();
+                    mnemos_telemetry::global().record(
+                        "mnemos-retrieval",
+                        "reranker.reload",
+                        true,
+                        "model reloaded from disk",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Online fine-tuning: nudge the reranker toward the reward for the
+    /// features of the engrams this recall surfaced, then persist so the
+    /// improvement survives restart. Gated by `MNEMOS_RERANKER_ONLINE`
+    /// (default on); learning happens even in shadow (`alpha == 0`).
+    fn online_reranker_update(&mut self, features: &[Vec<f64>], reward: f64) {
+        if !Self::reranker_online_enabled() || features.is_empty() || reward == 0.0 {
+            return;
+        }
+        let mut model = self.reranker.take().unwrap_or_else(mnemos_reranker::RerankerModel::seed);
+        let lr = Self::reranker_online_lr();
+        for f in features {
+            model.online_update(f, reward, lr);
+        }
+        // Persist to the LOCAL path so the seed stays pristine.
+        let _ = model.save(&Self::reranker_model_path());
+        self.reranker = Some(model);
+        self.reranker_mtime = std::fs::metadata(Self::reranker_model_path())
+            .and_then(|m| m.modified())
+            .ok();
+    }
+
+    /// Whether online reranker fine-tuning is enabled (`MNEMOS_RERANKER_ONLINE`,
+    /// default `true`).
+    fn reranker_online_enabled() -> bool {
+        match std::env::var("MNEMOS_RERANKER_ONLINE").ok().as_deref().map(str::trim) {
+            None | Some("") => true,
+            Some(v) => !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        }
+    }
+
+    /// Online learning rate (`MNEMOS_RERANKER_LR`, default `0.02`).
+    fn reranker_online_lr() -> f64 {
+        std::env::var("MNEMOS_RERANKER_LR")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0 && *v <= 1.0)
+            .unwrap_or(0.02)
     }
 
     /// Blend weight for the reranker (`MNEMOS_RERANKER_ALPHA`, default `0.0`).
@@ -795,6 +904,8 @@ impl RetrievalPipeline {
     /// Returns [`MnemosError`] when embedding, query building, the vector
     /// search, or candidate decoding fails.
     pub async fn recall(&mut self, query: &str, limit: usize) -> Result<Vec<ResonanceResult>> {
+        // Pick up a retrained model without restarting the daemon.
+        self.maybe_reload_reranker();
         // Step 1: embed the query client-side (no server-side Embed()).
         let query_embedding = match self.embedder.embed(query).await {
             Ok(v) => v,
@@ -910,8 +1021,14 @@ impl RetrievalPipeline {
             attr[IDX_RECALLS] = total / count;
         }
         let engram_ids: Vec<EngramId> = results.iter().map(|r| r.engram_id).collect();
+        let features: Vec<Vec<f64>> = results
+            .iter()
+            .enumerate()
+            .map(|(i, r)| mnemos_reranker::features_from_result(r, i))
+            .collect();
         self.last_attributions.clone_from(&attr);
         self.last_engram_ids.clone_from(&engram_ids);
+        self.last_features.clone_from(&features);
         // Opt-in ledger: isolate per-recall attributions + surfaced engrams
         // for parallel-safe, per-memory reward.
         if Self::ledger_enabled() {
@@ -923,6 +1040,7 @@ impl RetrievalPipeline {
                     attributions: attr,
                     engram_ids,
                     query_embedding: self.last_query_embedding.clone(),
+                    features: features.clone(),
                 },
             );
             // Keep ledger bounded (evict oldest when > 1024).
@@ -962,6 +1080,8 @@ impl RetrievalPipeline {
     ///
     /// Best-effort: neighbor fetch failures are skipped via telemetry.
     pub async fn recall_stimulated(&mut self, query: &str, limit: usize) -> Result<Vec<ResonanceResult>> {
+        // Pick up a retrained model without restarting the daemon.
+        self.maybe_reload_reranker();
         // Seed phase: reuse recall but avoid double activation bump by calling internal helper.
         // For simplicity, call recall and then do one spreading wave from its top results.
         let mut seed_results = self.recall(query, limit).await?;
@@ -1131,7 +1251,13 @@ impl RetrievalPipeline {
         }
         self.last_attributions.clone_from(&combined);
         let engram_ids: Vec<EngramId> = seed_results.iter().map(|r| r.engram_id).collect();
+        let features: Vec<Vec<f64>> = seed_results
+            .iter()
+            .enumerate()
+            .map(|(i, r)| mnemos_reranker::features_from_result(r, i))
+            .collect();
         self.last_engram_ids.clone_from(&engram_ids);
+        self.last_features.clone_from(&features);
         if let Some(id) = self.last_recall_id() {
             self.ledger.insert(
                 id,
@@ -1139,6 +1265,7 @@ impl RetrievalPipeline {
                     attributions: combined,
                     engram_ids,
                     query_embedding: self.last_query_embedding.clone(),
+                    features,
                 },
             );
         }
@@ -1180,6 +1307,9 @@ impl RetrievalPipeline {
         let targets = self.last_engram_ids.clone();
         let context = self.last_query_embedding.clone();
         self.apply_engram_reward(&targets, reward, &context).await;
+        // Online reranker fine-tuning (works even in shadow).
+        let features = self.last_features.clone();
+        self.online_reranker_update(&features, reward);
         Self::log_feedback(&serde_json::json!({
             "kind": "reward",
             "recall_id": self.last_recall_id(),
@@ -1270,6 +1400,8 @@ impl RetrievalPipeline {
         // gated by that recall's own query context.
         self.apply_engram_reward(&entry.engram_ids, score, &entry.query_embedding)
             .await;
+        // Online reranker fine-tuning on this recall's feature vectors.
+        self.online_reranker_update(&entry.features, score);
         Self::log_feedback(&serde_json::json!({
             "kind": "reward",
             "recall_id": recall_id,

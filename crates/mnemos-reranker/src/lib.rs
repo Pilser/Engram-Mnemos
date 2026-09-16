@@ -96,6 +96,41 @@ impl RerankerModel {
         Self::default()
     }
 
+    /// Shipped seed prior (used when no locally-trained model exists).
+    ///
+    /// Encodes only the obvious monotonicities so a fresh install has a
+    /// sensible starting point: higher semantic similarity, higher learned
+    /// reward, and earlier rank are more relevant. Local fine-tuning replaces
+    /// it as soon as feedback exists.
+    #[must_use]
+    pub fn seed() -> Self {
+        // Order: semantic, recency, |emotion|, importance, identity,
+        //        reward_score, reward_factor, resonance, position
+        Self {
+            version: default_version(),
+            trained_samples: 0,
+            weights: vec![3.0, 0.5, 0.0, 0.5, 0.5, 2.0, 1.0, 1.0, -0.2],
+            bias: -3.0,
+        }
+    }
+
+    /// One online logistic SGD step: push the score toward the reward.
+    ///
+    /// `reward` is the same `-1..1` scale as the reward tool; it maps to a
+    /// `0..1` label. Weights are clamped so a burst of feedback cannot blow
+    /// the model up.
+    pub fn online_update(&mut self, features: &[f64], reward: f64, lr: f64) {
+        let label = ((reward.clamp(-1.0, 1.0) + 1.0) / 2.0).clamp(0.0, 1.0);
+        let p = self.score(features);
+        let grad = label - p;
+        for (i, w) in self.weights.iter_mut().enumerate() {
+            *w += lr * grad * features.get(i).copied().unwrap_or(0.0);
+            *w = w.clamp(-10.0, 10.0);
+        }
+        self.bias = (self.bias + lr * grad).clamp(-20.0, 20.0);
+        self.trained_samples = self.trained_samples.saturating_add(1);
+    }
+
     /// Relevance probability in `(0, 1)`.
     #[must_use]
     pub fn score(&self, features: &[f64]) -> f64 {
