@@ -429,7 +429,12 @@ async fn dispatch_cli_rpc(cli: &Arc<Cli>, body: &[u8]) -> hyper::Response<HttpBo
         }
         "stats" => cli.stats().await.map(|s| serde_json::to_value(&s).unwrap_or_default()).map_err(|e| e.to_string()),
         "status" => match cli.stats().await {
-            Ok(stats) => Ok(serde_json::json!({"storage": {"ok": true, "stats": stats}, "embedding": {"ok": true, "note": "use shell engram status for live embedding ping"}, "llm": {"ok": true, "note": "use shell engram status for live LLM ping"}})),
+            Ok(stats) => Ok(serde_json::json!({
+                "storage": {"ok": true, "stats": stats},
+                "learning": learning_summary(),
+                "embedding": {"ok": true, "note": "daemon: live ping via provider"},
+                "llm": {"ok": true, "note": "daemon: live ping via provider"},
+            })),
             Err(e) => Err(e.to_string()),
         },
         "setup" => {
@@ -504,6 +509,58 @@ async fn handle_request(
 /// Record a serve-side failure via telemetry (stderr logging stays inline).
 fn record_serve_error(detail: &str) {
     mnemos_telemetry::global().record("mnemos-mcp-http", "serve", false, detail);
+}
+
+/// Compact learning-state summary read from the local reranker model file, so
+/// the shell `status` (which forwards here) still shows learning progress.
+fn learning_summary() -> serde_json::Value {
+    let path = std::env::var("MNEMOS_RERANKER_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "./data/helix/reranker.json".to_string());
+    let model = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok());
+    let (state, reward_events) = match &model {
+        Some(m) => (
+            "local",
+            m.get("reward_events")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        ),
+        None => ("seed", 0),
+    };
+    let min_pairs = std::env::var("MNEMOS_RERANKER_MIN_PAIRS")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+        .unwrap_or(500.0);
+    let max_alpha = std::env::var("MNEMOS_RERANKER_MAX_ALPHA")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(0.5);
+    let raw = std::env::var("MNEMOS_RERANKER_ALPHA").ok();
+    let mode = raw
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("auto");
+    let alpha = if mode.eq_ignore_ascii_case("auto") {
+        ((reward_events as f64) / min_pairs).clamp(0.0, 1.0) * max_alpha
+    } else {
+        mode.parse::<f64>()
+            .ok()
+            .filter(|v| (0.0..=1.0).contains(v))
+            .unwrap_or(0.0)
+    };
+    serde_json::json!({
+        "model": state,
+        "reward_events": reward_events,
+        "alpha": (alpha * 1000.0).round() / 1000.0,
+        "alpha_mode": mode,
+        "state": if alpha <= 0.0 { "shadow" } else { "active" },
+    })
 }
 
 /// Minimal Tokio ↔ hyper IO adapter (avoids a `hyper-util` dependency).
