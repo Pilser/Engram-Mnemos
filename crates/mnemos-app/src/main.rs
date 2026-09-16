@@ -13,7 +13,7 @@ use mnemos_cli::Cli;
 use mnemos_concept_extractor::LlmConceptExtractor;
 use mnemos_consolidation::ConsolidationPipeline;
 use mnemos_contradiction::ContradictionDetector;
-use mnemos_core::{LlmConfig, MnemosConfig};
+use mnemos_core::{LlmConfig, MnemosConfig, StorageBackend};
 use mnemos_edge_weights::EdgeWeights;
 use mnemos_embedding_local::LocalEmbeddingProvider;
 use mnemos_embedding_openai::OpenAiEmbeddingProvider;
@@ -587,6 +587,93 @@ async fn try_daemon(command: &Command) -> Option<i32> {
     }
 }
 
+/// Whether first-boot vector-index setup runs on daemon start
+/// (`MNEMOS_SETUP_ON_START`, default on).
+fn setup_on_start_enabled() -> bool {
+    match std::env::var("MNEMOS_SETUP_ON_START")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        None | Some("") => true,
+        Some(v) => !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+    }
+}
+
+/// Stamp path recording that the vector index was created.
+///
+/// Disk backends use a file in the data root (so it survives restarts);
+/// ephemeral/server backends return `None` (setup runs every boot, idempotent).
+fn index_stamp_path(config: &MnemosConfig) -> Option<String> {
+    if let Ok(p) = std::env::var("MNEMOS_INDEX_STAMP") {
+        if !p.trim().is_empty() {
+            return Some(p.trim().to_string());
+        }
+    }
+    match config.storage.effective_backend() {
+        StorageBackend::EmbeddedDisk => {
+            let root = config.storage.data_root.trim().trim_end_matches('/');
+            if root.is_empty() {
+                None
+            } else {
+                Some(format!("{root}/.engram_index_ready"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// First-boot bootstrap: create the Engram vector index if it does not exist.
+///
+/// A fresh embedded DB has no vector index until `engram setup` runs, so the
+/// first recall would fail with `index_not_found`. This runs setup once and
+/// records a stamp so later boots skip it. Idempotent
+/// (`create_index_if_not_exists`); on failure the stamp is not written, so the
+/// next boot retries.
+async fn ensure_vector_index(cli: &Arc<Cli>, config: &MnemosConfig) -> bool {
+    if !setup_on_start_enabled() {
+        return true;
+    }
+    let stamp = index_stamp_path(config);
+    if let Some(path) = &stamp {
+        if std::path::Path::new(path).exists() {
+            eprintln!("engram: vector index stamp present ({path}); skipping setup");
+            return true;
+        }
+    }
+    match cli.setup_vector_index(config.llm.embedding_dim).await {
+        Ok(message) => {
+            if let Some(path) = &stamp {
+                if let Some(parent) = std::path::Path::new(path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path, format!("{}\n", config.llm.embedding_dim));
+            }
+            eprintln!(
+                "engram: first-boot setup ok (dim={}): {message}",
+                config.llm.embedding_dim
+            );
+            true
+        }
+        Err(error) => {
+            eprintln!(
+                "engram: warning: first-boot setup failed: {error} \
+                 (recall will fail until `engram setup` succeeds)"
+            );
+            mnemos_telemetry::global().record(
+                "mnemos-app",
+                "setup_on_start",
+                false,
+                &error.to_string(),
+            );
+            false
+        }
+    }
+}
+
 /// Persistent daemon: builds pipelines once, serves HTTP (`/mcp*`, `/cli`,
 /// `/health`, `/telemetry*`) forever, and runs background consolidation when
 /// `MNEMOS_CONSOLIDATE_INTERVAL_SECS > 0`.
@@ -618,6 +705,9 @@ async fn serve_forever(config: &MnemosConfig) -> i32 {
             return 1;
         }
     };
+    // First-boot bootstrap: a fresh DB has no vector index until setup runs,
+    // so run it here (stamp-guarded) before serving any recall request.
+    ensure_vector_index(&cli, config).await;
     // Background consolidation ticker ("background processing" while alive).
     let interval_secs: u64 = std::env::var("MNEMOS_CONSOLIDATE_INTERVAL_SECS")
         .ok()
