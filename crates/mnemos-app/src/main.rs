@@ -626,6 +626,28 @@ fn index_stamp_path(config: &MnemosConfig) -> Option<String> {
     }
 }
 
+/// Create the embedded data root if it does not exist.
+///
+/// A brand-new install has no `MNEMOS_DATA_ROOT` directory yet, and the
+/// embedded engine fails to open ("Unable to canonicalize filesystem root").
+/// Best-effort: a failure is logged and storage open reports the real error.
+fn ensure_data_root(config: &MnemosConfig) {
+    if config.storage.effective_backend() != StorageBackend::EmbeddedDisk {
+        return;
+    }
+    let root = config.storage.data_root.trim();
+    if root.is_empty() {
+        return;
+    }
+    if !std::path::Path::new(root).exists() {
+        if let Err(error) = std::fs::create_dir_all(root) {
+            eprintln!("engram: warning: cannot create data root {root}: {error}");
+        } else {
+            eprintln!("engram: created data root {root}");
+        }
+    }
+}
+
 /// First-boot bootstrap: create the Engram vector index if it does not exist.
 ///
 /// A fresh embedded DB has no vector index until `engram setup` runs, so the
@@ -688,6 +710,8 @@ async fn serve_forever(config: &MnemosConfig) -> i32 {
             return 1;
         }
     };
+    // Brand-new installs have no data root yet; create it before opening.
+    ensure_data_root(config);
     // Single embedded open per process: Helix invalidates older handles when
     // the same Disk path is opened twice ("newer DB client"), so every
     // pipeline and tool shares clones of this one handle.
@@ -897,6 +921,8 @@ async fn dispatch(command: Command) -> i32 {
         );
         return 1;
     }
+    // mcp-server / mcp-tools open storage locally: make sure the root exists.
+    ensure_data_root(&config);
     let storage = match Storage::from_config(&config.storage).await {
         Ok(s) => s,
         Err(error) => {
