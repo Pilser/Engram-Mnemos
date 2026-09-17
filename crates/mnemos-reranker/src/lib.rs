@@ -236,6 +236,121 @@ fn sigmoid(z: f64) -> f64 {
     1.0 / (1.0 + (-z.clamp(-60.0, 60.0)).exp())
 }
 
+/// Feature vector for one logged candidate (must match [`FEATURE_NAMES`] order).
+#[must_use]
+pub fn features_from_log(r: &serde_json::Value, position: usize) -> Vec<f64> {
+    let g = |k: &str| r.get(k).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    vec![
+        g("semantic_sim"),
+        g("recency_weight"),
+        g("emotional_charge").abs(),
+        g("importance_score"),
+        g("identity_alignment"),
+        g("reward_score"),
+        g("reward_factor"),
+        g("resonance_score"),
+        position as f64,
+    ]
+}
+
+/// Batch-train the reranker from a feedback JSONL log.
+///
+/// Labels are per-recall (one scalar reward covers the whole shown set), so
+/// preference pairs are built *across* recalls: candidates from positively
+/// rewarded recalls should outrank candidates from negatively rewarded ones.
+/// Saves the model and returns a summary. Shared by the CLI (`train-reranker`)
+/// and the HTTP mirror endpoint.
+///
+/// # Errors
+///
+/// Returns a message when the log cannot be read, both signs are absent, or
+/// the model cannot be saved.
+pub fn train_from_log(log_path: &str, model_path: &str) -> Result<serde_json::Value, String> {
+    use std::collections::HashMap;
+    let data = std::fs::read_to_string(log_path)
+        .map_err(|e| format!("cannot read feedback log {log_path}: {e}"))?;
+    let mut candidates: HashMap<u64, Vec<Vec<f64>>> = HashMap::new();
+    let mut rewards: HashMap<u64, f64> = HashMap::new();
+    for line in data.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match v.get("kind").and_then(serde_json::Value::as_str) {
+            Some("recall") => {
+                let Some(rid) = v.get("recall_id").and_then(serde_json::Value::as_u64) else {
+                    continue;
+                };
+                let rows: Vec<Vec<f64>> = v
+                    .get("results")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .enumerate()
+                            .map(|(i, r)| features_from_log(r, i))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                candidates.entry(rid).or_default().extend(rows);
+            }
+            Some("reward") => {
+                if let (Some(rid), Some(rew)) = (
+                    v.get("recall_id").and_then(serde_json::Value::as_u64),
+                    v.get("reward").and_then(serde_json::Value::as_f64),
+                ) {
+                    rewards.insert(rid, rew);
+                }
+            }
+            _ => {}
+        }
+    }
+    const POS: f64 = 0.2;
+    const NEG: f64 = -0.2;
+    let positives: Vec<&Vec<f64>> = candidates
+        .iter()
+        .filter(|(rid, _)| rewards.get(rid).is_some_and(|r| *r > POS))
+        .flat_map(|(_, rows)| rows.iter())
+        .collect();
+    let negatives: Vec<&Vec<f64>> = candidates
+        .iter()
+        .filter(|(rid, _)| rewards.get(rid).is_some_and(|r| *r < NEG))
+        .flat_map(|(_, rows)| rows.iter())
+        .collect();
+    if positives.is_empty() || negatives.is_empty() {
+        return Err(format!(
+            "not enough feedback yet (positive recalls={}, negative recalls={}); need both signs",
+            candidates
+                .keys()
+                .filter(|rid| rewards.get(rid).is_some_and(|r| *r > POS))
+                .count(),
+            candidates
+                .keys()
+                .filter(|rid| rewards.get(rid).is_some_and(|r| *r < NEG))
+                .count(),
+        ));
+    }
+    const MAX_PAIRS: usize = 200_000;
+    let mut pairs: Vec<PreferencePair> = Vec::new();
+    'outer: for p in &positives {
+        for n in &negatives {
+            pairs.push(((*p).clone(), (*n).clone()));
+            if pairs.len() >= MAX_PAIRS {
+                break 'outer;
+            }
+        }
+    }
+    let mut model = RerankerModel::load(model_path).unwrap_or_default();
+    model.train_pairwise(&pairs, 0.05, 20);
+    model.save(model_path)?;
+    Ok(serde_json::json!({
+        "model": model_path,
+        "pairs": pairs.len(),
+        "positive_candidates": positives.len(),
+        "negative_candidates": negatives.len(),
+        "trained_samples": model.trained_samples,
+        "alpha_env": "MNEMOS_RERANKER_ALPHA (auto = ramp; 0.0 = shadow)",
+    }))
+}
+
 /// Blend a CRR score with a reranker probability.
 ///
 /// `p = 0.5` is neutral (returns `crr`); `p = 1.0` doubles it; `p = 0.0`

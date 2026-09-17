@@ -23,6 +23,7 @@
 !docs/**
 !models/
 !models/**
+!engramapi.txt
 !.env.example
 !README.md
 !LICENSE

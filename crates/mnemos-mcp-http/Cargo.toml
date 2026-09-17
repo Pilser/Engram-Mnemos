@@ -10,7 +10,9 @@ mnemos-cli = { path = "../mnemos-cli" }
 mnemos-mcp-server = { path = "../mnemos-mcp-server" }
 mnemos-mcp-tools = { path = "../mnemos-mcp-tools" }
 mnemos-mcp-protocol = { path = "../mnemos-mcp-protocol" }
+mnemos-reranker = { workspace = true }
 mnemos-telemetry = { path = "../mnemos-telemetry" }
+chrono = { workspace = true }
 rmcp = { workspace = true }
 hyper = { workspace = true }
 tower = { workspace = true }

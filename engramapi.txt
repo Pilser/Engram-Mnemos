@@ -1,0 +1,165 @@
+engram HTTP API — 1:1 mirror of the `engram` bash CLI
+=====================================================
+
+Served IN-PROCESS by `engram serve` (same process that owns the HelixDB
+handle; never a sidecar). Base URL: http://<container-ip>:4545
+
+Bind: MNEMOS_MCP_HOST=0.0.0.0 (bridge-reachable)  MNEMOS_MCP_PORT=4545
+Methods: every endpoint accepts BOTH GET (query string) and POST (JSON body).
+Response envelope (every endpoint):
+  success: {"ok": true,  "data": <cli-json>}
+  failure: {"ok": false, "error": "<same message the CLI would print>"}
+HTTP status: 200 ok · 400 bad input · 405 wrong method · 500 internal.
+No auth (trusted bridge; the wrapper authorizes the caller before forwarding).
+Every call is logged to stdout: `engram-api: <METHOD> <path> from <ip> at <ts>`.
+
+Learning is load-bearing: recall returns `recall_id`; reward it
+(score -1.0..1.0) exactly like the local CLI. An unrewarded remote recall is
+identical to an unrewarded local recall (no special-casing).
+
+Not exposed (process modes, not RPCs): serve, mcp-server, mcp-tools.
+
+
+------------------------------------------------------------------------------
+GET /health
+  methods: GET
+  fields:  none
+  mirrors: (daemon liveness; does not touch the DB)
+  request: curl http://127.0.0.1:4545/health
+  response: {"ok":true,"data":{"status":"up"}}
+
+
+------------------------------------------------------------------------------
+ANY /ingest        mirrors: engram ingest <text...> [--seq <prev_id>] [--seq-pos N]
+  methods: GET | POST
+  fields:
+    text*    string          the episode text (joined words)
+    prev_id? u64             == --seq  (previous engram id; chains TemporalSequence)
+    seq_pos? i64             == --seq-pos (position number; fan-out at a level)
+  defaults: none (prev_id absent = plain ingest)
+  POST request:  {"text":"the sky is blue"}
+  POST seq:      {"text":"chapter 2","prev_id":123,"seq_pos":1}
+  GET  request:  /ingest?text=the%20sky%20is%20blue
+  GET  seq:      /ingest?text=chapter%202&prev_id=123&seq_pos=1
+  response: {"ok":true,"data":{"engram_id":124}}
+  errors: 400 {"ok":false,"error":"ingest needs {text}"}
+         400 {"ok":false,"error":"ingest needs text: engram ingest <text...>"}
+
+
+------------------------------------------------------------------------------
+ANY /recall        mirrors: engram recall <query...> [--limit N]
+                            engram recall --follow-seq <id> [--depth N] [--dir up|down|both]
+  methods: GET | POST
+  fields:
+    query*      string       natural-language query (required unless follow_seq)
+    limit?      usize = 5    == --limit
+    follow_seq? u64          == --follow-seq (walk TemporalSequence from this id; ignores query)
+    depth?      usize = 10   == --depth (also accepts seq_depth)
+    dir?        string=down  == --dir  (up|down|both; also accepts seq_dir)
+  POST request:  {"query":"blue sky","limit":5}
+  POST seq walk: {"follow_seq":123,"depth":5,"dir":"down"}
+  GET  request:  /recall?query=blue%20sky&limit=5
+  GET  seq walk: /recall?follow_seq=123&depth=5&dir=down
+  response (results):   {"ok":true,"data":{"results":[{"engram_id":..,"resonance_score":..,
+                          "episode_raw":..,"emotional_charge":..,"importance_score":..,
+                          "identity_alignment":..,"semantic_sim":..,"recency_weight":..,
+                          "reward_score":..,"reward_factor":..}],"recall_id":7}}
+  response (no hit):    {"ok":true,"data":{"results":[],"recall_id":null,"message":"I don't know"}}
+  response (seq walk):  {"ok":true,"data":{"sequential_chain":[124,130],"start_id":123,
+                          "depth":5,"dir":"down"}}
+  errors: 400 {"ok":false,"error":"recall needs a query: engram recall <query...> [--limit N]"}
+         400 {"ok":false,"error":"--dir must be up|down|both"}
+  NOTE: reward the returned recall_id (score -1.0..1.0) so the memory learns.
+
+
+------------------------------------------------------------------------------
+ANY /reward        mirrors: engram reward <score> [--recall-id N | attributions csv]
+  methods: GET | POST
+  fields:
+    score*        f64          -1.0 (irrelevant) .. 1.0 (relevant); 0 = no-op
+    recall_id?    u64          ledger id from a prior /recall (parallel-safe)
+    attributions? [f64] | csv  raw per-edge attributions (used when recall_id absent)
+  defaults: recall_id absent -> attributions (or last recall)
+  POST request:  {"score":1.0,"recall_id":7}
+  POST raw:      {"score":-1.0,"attributions":[0.5,0.0,0.0,0.0,0.0,0.0,0.0,0.0]}
+  GET  request:  /reward?score=1.0&recall_id=7
+  GET  raw:      /reward?score=-1.0&attributions=0.5,0,0,0,0,0,0,0
+  response: {"ok":true,"data":{"applied":true}}
+  errors: 400 {"ok":false,"error":"reward needs a score: engram reward <score> [attributions csv]"}
+
+
+------------------------------------------------------------------------------
+ANY /consolidate   mirrors: engram consolidate
+  methods: GET | POST
+  fields:
+    aggressive? bool = false   run full mitosis + contradiction resolution
+  POST request:  {"aggressive":false}
+  GET  request:  /consolidate
+  response: {"ok":true,"data":{"pruned":0,"compressed":0,"promoted":0,"contradictions_linked":0}}
+  errors: 500 on storage failure
+
+
+------------------------------------------------------------------------------
+ANY /setup         mirrors: engram setup
+  methods: GET | POST
+  fields:  none (dimension comes from env EMBEDDING_DIM)
+  request: /setup
+  response: {"ok":true,"data":{"dimension":384,"message":"vector index on Engram.embedding (dim 384): ..."}}
+  errors: 500 on storage failure
+
+
+------------------------------------------------------------------------------
+ANY /stats         mirrors: engram stats
+  methods: GET | POST
+  fields:  none
+  request: /stats
+  response: {"ok":true,"data":{"total_engrams":39,"contradictions":0,"concepts":175,"identities":12}}
+  errors: 500 on storage failure
+
+
+------------------------------------------------------------------------------
+ANY /status        mirrors: engram status
+  methods: GET | POST
+  fields:  none
+  request: /status
+  response: {"ok":true,"data":{
+      "storage":{"ok":true,"stats":{"total_engrams":39,"contradictions":0,"concepts":175,"identities":12}},
+      "learning":{"model":"local","reward_events":8,"alpha":0.008,"alpha_mode":"auto",
+                  "state":"active","min_pairs_for_full_alpha":500,"online_finetuning":true,
+                  "trained_samples":2403},
+      "embedding":{"ok":true,"note":"daemon: live ping via provider"},
+      "llm":{"ok":true,"note":"daemon: live ping via provider"}}}
+  errors: 500 on storage failure
+
+
+------------------------------------------------------------------------------
+ANY /train-reranker  mirrors: engram train-reranker
+  methods: GET | POST
+  fields:  none (reads MNEMOS_FEEDBACK_LOG, writes MNEMOS_RERANKER_MODEL)
+  request: /train-reranker
+  response: {"ok":true,"data":{"model":"./data/helix/reranker.json","pairs":144,
+              "positive_candidates":12,"negative_candidates":12,"trained_samples":2880,
+              "alpha_env":"MNEMOS_RERANKER_ALPHA (auto = ramp; 0.0 = shadow)"}}
+  errors: 400 {"ok":false,"error":"not enough feedback yet (positive recalls=0, negative recalls=3); need both signs"}
+
+
+------------------------------------------------------------------------------
+ANY /help          mirrors: engram --help
+  methods: GET | POST
+  fields:  none
+  request: /help
+  response: {"ok":true,"data":{ ...machine-readable endpoint list... }}
+
+
+==============================================================================
+NOTES
+  - Existing MCP surfaces are unchanged: /mcp, /mcp/tools, /mcp/cli, /cli,
+    /tools, /telemetry*.
+  - GET query values are strings and coerced per field (u64/i64/f64/bool/[f64]).
+  - POST body must be a JSON object; its keys override GET query values.
+  - Example end-to-end (remote caller):
+      curl -s 'http://<container-ip>:4545/recall?query=blue%20sky&limit=5'
+      curl -s -X POST http://<container-ip>:4545/reward \
+           -H 'content-type: application/json' \
+           -d '{"score":1.0,"recall_id":7}'
+==============================================================================

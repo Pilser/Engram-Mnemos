@@ -2554,6 +2554,7 @@ name = "mnemos-mcp-http"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "chrono",
  "http-body-util",
  "hyper",
  "mnemos-cli",
@@ -2561,6 +2562,7 @@ dependencies = [
  "mnemos-mcp-protocol",
  "mnemos-mcp-server",
  "mnemos-mcp-tools",
+ "mnemos-reranker",
  "mnemos-telemetry",
  "rmcp",
  "serde_json",

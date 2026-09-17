@@ -328,7 +328,8 @@ async fn handle_local(
     let clean = path.split(['?', '#']).next().unwrap_or(path);
     if clean == HEALTH_PATH {
         return Some(if *method == hyper::Method::GET {
-            json_response(serde_json::json!({"status": "ok", "service": "engram-daemon"}))
+            // Wake check: must not touch the DB.
+            json_response(serde_json::json!({"ok": true, "data": {"status": "up"}}))
         } else {
             hyper::Response::builder()
                 .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
@@ -356,78 +357,170 @@ async fn handle_local(
     Some(dispatch_cli_rpc(cli, &body).await)
 }
 
-/// Execute one CLI command against the running daemon's `Cli`.
+/// Read a string field from a request object.
+fn get_str<'a>(v: &'a serde_json::Value, k: &str) -> Option<&'a str> {
+    v.get(k).and_then(serde_json::Value::as_str)
+}
+
+/// Read an unsigned integer field (number or numeric string).
+fn get_u64(v: &serde_json::Value, k: &str) -> Option<u64> {
+    v.get(k).and_then(|x| {
+        x.as_u64()
+            .or_else(|| x.as_i64().and_then(|i| u64::try_from(i).ok()))
+            .or_else(|| x.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+    })
+}
+
+/// Read a float field (number or numeric string).
+fn get_f64(v: &serde_json::Value, k: &str) -> Option<f64> {
+    v.get(k).and_then(|x| {
+        x.as_f64()
+            .or_else(|| x.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+    })
+}
+
+/// Read a boolean field (bool or `1/true/yes/on`).
+fn get_bool(v: &serde_json::Value, k: &str) -> Option<bool> {
+    v.get(k).and_then(|x| {
+        x.as_bool().or_else(|| {
+            x.as_str().map(|s| {
+                matches!(
+                    s.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+        })
+    })
+}
+
+/// Read a float array field (JSON array or comma-separated string).
+fn get_f64_vec(v: &serde_json::Value, k: &str) -> Vec<f64> {
+    match v.get(k) {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|x| {
+                x.as_f64()
+                    .or_else(|| x.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+            })
+            .collect(),
+        Some(serde_json::Value::String(s)) => s
+            .split(',')
+            .filter_map(|p| p.trim().parse::<f64>().ok())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Coerce a GET query string into a request object (all values as strings;
+/// the typed getters above coerce them).
+fn query_to_json(query: Option<&str>) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for (k, v) in parse_query(query) {
+        map.insert(k, serde_json::json!(v));
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Execute one CLI command against the running daemon's `Cli`, returning the
+/// command's structured output or `(http_status, error_message)`.
 ///
-/// Request: `{"command": "ingest"|"recall"|"reward"|"consolidate"|"stats",
-/// "text"?, "query"?, "limit"?, "attributions"?, "score"?, "recall_id"?, "aggressive"?}`.
-/// Always HTTP 200 with `{"ok": true, "data": ...}` or `{"ok": false, "error": ...}`;
-/// failures are recorded via telemetry (`mnemos-mcp-http` / `cli_rpc`).
-async fn dispatch_cli_rpc(cli: &Arc<Cli>, body: &[u8]) -> hyper::Response<HttpBody> {
-    let req: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => {
-            mnemos_telemetry::global().record("mnemos-mcp-http", "cli_rpc", false, &format!("bad json: {e}"));
-            return json_response(serde_json::json!({"ok": false, "error": format!("bad json: {e}")}));
-        }
-    };
-    let command = req.get("command").and_then(|v| v.as_str()).unwrap_or("");
-    let out: Result<serde_json::Value, String> = match command {
-        "ingest" => match req.get("text").and_then(|v| v.as_str()) {
-            Some(text) => {
-                let prev_id = req.get("prev_id").and_then(serde_json::Value::as_u64);
-                let seq_pos = req.get("seq_pos").and_then(serde_json::Value::as_i64);
-                let res = if let Some(pid) = prev_id {
-                    cli.ingest_sequential(text, Some(pid), seq_pos).await
-                } else {
-                    cli.ingest(text).await
-                };
-                res.map(|id| serde_json::json!({"engram_id": id})).map_err(|e| e.to_string())
+/// Mirrors the CLI exactly: same defaults, same result keys, same messages.
+async fn execute_cli_value(
+    cli: &Arc<Cli>,
+    req: &serde_json::Value,
+) -> Result<serde_json::Value, (u16, String)> {
+    let command = get_str(req, "command").unwrap_or("");
+    match command {
+        "ingest" => {
+            let text = get_str(req, "text")
+                .ok_or_else(|| (400, "ingest needs {text}".to_string()))?;
+            if text.trim().is_empty() {
+                return Err((
+                    400,
+                    "ingest needs text: engram ingest <text...>".to_string(),
+                ));
             }
-            None => Err("ingest needs {text}".to_string()),
-        },
-        "recall" => {
-            // Follow sequential chain if follow_seq present
-            if let Some(sid) = req.get("follow_seq").and_then(serde_json::Value::as_u64) {
-                let depth = req.get("depth").or_else(|| req.get("seq_depth")).and_then(serde_json::Value::as_u64).unwrap_or(10) as usize;
-                let dir = req.get("dir").or_else(|| req.get("seq_dir")).and_then(|v| v.as_str()).unwrap_or("down");
-                match cli.follow_sequence(sid, depth, dir).await {
-                    Ok(chain) => serde_json::to_value(&serde_json::json!({"sequential_chain": chain, "start_id": sid, "depth": depth, "dir": dir})).map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                }
+            let prev_id = get_u64(req, "prev_id").or_else(|| get_u64(req, "seq"));
+            let seq_pos = get_u64(req, "seq_pos")
+                .or_else(|| get_u64(req, "pos"))
+                .map(|v| v as i64);
+            let res = if let Some(pid) = prev_id {
+                cli.ingest_sequential(text, Some(pid), seq_pos).await
             } else {
-                let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                let limit = req.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(5) as usize;
-                match cli.recall(query, limit).await {
-                    Ok(results) => {
-                        if results.is_empty() {
-                            return json_response(serde_json::json!({
-                                "ok": true,
-                                "data": {"results": [], "recall_id": null, "message": "I don't know"}
-                            }));
-                        }
-                        let recall_id = cli.last_recall_id().await;
-                        serde_json::to_value(&serde_json::json!({"results": results, "recall_id": recall_id})).map_err(|e| e.to_string())
-                    }
-                    Err(e) => Err(e.to_string()),
+                cli.ingest(text).await
+            };
+            res.map(|id| serde_json::json!({"engram_id": id}))
+                .map_err(|e| (500, e.to_string()))
+        }
+        "recall" => {
+            if let Some(sid) = get_u64(req, "follow_seq") {
+                let depth = get_u64(req, "depth")
+                    .or_else(|| get_u64(req, "seq_depth"))
+                    .unwrap_or(10) as usize;
+                let dir = get_str(req, "dir")
+                    .or_else(|| get_str(req, "seq_dir"))
+                    .unwrap_or("down");
+                if !matches!(dir, "up" | "down" | "both") {
+                    return Err((400, "--dir must be up|down|both".to_string()));
                 }
+                return cli
+                    .follow_sequence(sid, depth, dir)
+                    .await
+                    .map(|chain| {
+                        serde_json::json!({
+                            "sequential_chain": chain,
+                            "start_id": sid,
+                            "depth": depth,
+                            "dir": dir,
+                        })
+                    })
+                    .map_err(|e| (500, e.to_string()));
             }
+            let query = get_str(req, "query")
+                .ok_or_else(|| (400, "recall needs a query: engram recall <query...> [--limit N]".to_string()))?;
+            if query.trim().is_empty() {
+                return Err((
+                    400,
+                    "recall needs a query: engram recall <query...> [--limit N]".to_string(),
+                ));
+            }
+            let limit = get_u64(req, "limit").unwrap_or(5) as usize;
+            let results = cli.recall(query, limit).await.map_err(|e| (500, e.to_string()))?;
+            if results.is_empty() {
+                return Ok(serde_json::json!({
+                    "results": [],
+                    "recall_id": serde_json::Value::Null,
+                    "message": "I don't know",
+                }));
+            }
+            let recall_id = cli.last_recall_id().await;
+            Ok(serde_json::json!({"results": results, "recall_id": recall_id}))
         }
         "reward" => {
-            let score = req.get("score").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            let res = match req.get("recall_id").and_then(serde_json::Value::as_u64) {
+            let score = get_f64(req, "score")
+                .ok_or_else(|| (400, "reward needs a score: engram reward <score> [attributions csv]".to_string()))?;
+            let res = match get_u64(req, "recall_id") {
                 Some(id) => cli.reward_with_id(id, score).await,
                 None => {
-                    let attr: Vec<f64> = req.get("attributions").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+                    let attr = get_f64_vec(req, "attributions");
                     cli.reward(&attr, score).await
                 }
             };
-            res.map(|()| serde_json::json!({"ok": true})).map_err(|e| e.to_string())
+            res.map(|()| serde_json::json!({"applied": true}))
+                .map_err(|e| (500, e.to_string()))
         }
         "consolidate" => {
-            let aggressive = req.get("aggressive").and_then(serde_json::Value::as_bool).unwrap_or(false);
-            cli.consolidate_aggressive(aggressive).await.map(|r| serde_json::to_value(&r).unwrap_or_default()).map_err(|e| e.to_string())
+            let aggressive = get_bool(req, "aggressive").unwrap_or(false);
+            cli.consolidate_aggressive(aggressive)
+                .await
+                .map(|r| serde_json::to_value(&r).unwrap_or_default())
+                .map_err(|e| (500, e.to_string()))
         }
-        "stats" => cli.stats().await.map(|s| serde_json::to_value(&s).unwrap_or_default()).map_err(|e| e.to_string()),
+        "stats" => cli
+            .stats()
+            .await
+            .map(|s| serde_json::to_value(&s).unwrap_or_default())
+            .map_err(|e| (500, e.to_string())),
         "status" => match cli.stats().await {
             Ok(stats) => Ok(serde_json::json!({
                 "storage": {"ok": true, "stats": stats},
@@ -435,22 +528,188 @@ async fn dispatch_cli_rpc(cli: &Arc<Cli>, body: &[u8]) -> hyper::Response<HttpBo
                 "embedding": {"ok": true, "note": "daemon: live ping via provider"},
                 "llm": {"ok": true, "note": "daemon: live ping via provider"},
             })),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err((500, e.to_string())),
         },
         "setup" => {
             // Dimension comes from env (EMBEDDING_DIM), never from the request.
             let dimension = mnemos_core::embedding_dim_from_env();
-            cli.setup_vector_index(dimension).await.map(|s| serde_json::json!({"dimension": dimension, "message": s})).map_err(|e| e.to_string())
+            cli.setup_vector_index(dimension)
+                .await
+                .map(|s| serde_json::json!({"dimension": dimension, "message": s}))
+                .map_err(|e| (500, e.to_string()))
         }
-        other => Err(format!("unknown command {other:?} (ingest|recall|reward|consolidate|stats|status|setup)")),
+        "train-reranker" => {
+            let log_path = std::env::var("MNEMOS_FEEDBACK_LOG")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "./data/helix/feedback.jsonl".to_string());
+            let model_path = std::env::var("MNEMOS_RERANKER_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "./data/helix/reranker.json".to_string());
+            mnemos_reranker::train_from_log(&log_path, &model_path).map_err(|e| (400, e))
+        }
+        other => Err((
+            400,
+            format!(
+                "unknown command {other:?} (ingest|recall|reward|consolidate|setup|stats|status|train-reranker)"
+            ),
+        )),
+    }
+}
+
+/// `POST /cli` — command name in the body's `command` field. Always HTTP 200
+/// with `{"ok": true|false, ...}` (legacy behaviour, kept for compatibility).
+async fn dispatch_cli_rpc(cli: &Arc<Cli>, body: &[u8]) -> hyper::Response<HttpBody> {
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            mnemos_telemetry::global().record(
+                "mnemos-mcp-http",
+                "cli_rpc",
+                false,
+                &format!("bad json: {e}"),
+            );
+            return json_response(
+                serde_json::json!({"ok": false, "error": format!("bad json: {e}")}),
+            );
+        }
     };
-    match out {
+    match execute_cli_value(cli, &req).await {
         Ok(data) => json_response(serde_json::json!({"ok": true, "data": data})),
-        Err(error) => {
+        Err((_status, error)) => {
             mnemos_telemetry::global().record("mnemos-mcp-http", "cli_rpc", false, &error);
             json_response(serde_json::json!({"ok": false, "error": error}))
         }
     }
+}
+
+/// Map a mirror path to its CLI command (callable commands only).
+///
+/// Process modes (`serve`, `mcp-server`, `mcp-tools`) are not RPCs and are
+/// intentionally absent. `/help` is the mirror of `engram --help`.
+#[must_use]
+pub fn mirror_command(path: &str) -> Option<&'static str> {
+    match path {
+        "/ingest" => Some("ingest"),
+        "/recall" => Some("recall"),
+        "/reward" => Some("reward"),
+        "/consolidate" => Some("consolidate"),
+        "/setup" => Some("setup"),
+        "/stats" => Some("stats"),
+        "/status" => Some("status"),
+        "/train-reranker" => Some("train-reranker"),
+        "/help" => Some("help"),
+        _ => None,
+    }
+}
+
+/// Machine-readable mirror of `engram --help` (endpoints + fields).
+fn mirror_help() -> serde_json::Value {
+    serde_json::json!({
+        "usage": "engram <command> [args]  |  HTTP: <METHOD> http://<host>:4545/<command>",
+        "capability": "episodic memory with optional sequential story chains (TemporalSequence); every recall must be rewarded via reward (use recall_id from recall); recall answers \"I don't know\" when nothing is relevant; learning is automatic (just recall+reward)",
+        "response": "{\"ok\": true, \"data\": <cli-json>} | {\"ok\": false, \"error\": \"<cli message>\"}",
+        "commands": {
+            "ingest": {"methods": ["GET","POST"], "fields": {"text*": "string", "prev_id?": "u64 (== --seq)", "seq_pos?": "i64 (== --seq-pos)"}, "returns": {"engram_id": "u64"}},
+            "recall": {"methods": ["GET","POST"], "fields": {"query*": "string", "limit?": "usize=5", "follow_seq?": "u64 (== --follow-seq)", "depth?": "usize=10 (== --depth)", "dir?": "up|down|both=down (== --dir)"}, "returns": {"results": "[...]", "recall_id": "u64|null"} },
+            "reward": {"methods": ["GET","POST"], "fields": {"score*": "f64 -1.0..1.0", "recall_id?": "u64", "attributions?": "[f64] or csv"}, "returns": {"applied": true}},
+            "consolidate": {"methods": ["GET","POST"], "fields": {"aggressive?": "bool=false"}, "returns": {"pruned": "u64", "compressed": "u64", "promoted": "u64", "contradictions_linked": "u64"}},
+            "setup": {"methods": ["GET","POST"], "fields": {}, "returns": {"dimension": "usize", "message": "string"}},
+            "stats": {"methods": ["GET","POST"], "fields": {}, "returns": {"total_engrams": "u64", "contradictions": "u64", "concepts": "u64", "identities": "u64"}},
+            "status": {"methods": ["GET","POST"], "fields": {}, "returns": {"storage": "object", "learning": "object", "embedding": "object", "llm": "object"}},
+            "train-reranker": {"methods": ["GET","POST"], "fields": {}, "returns": {"model": "string", "pairs": "usize", "trained_samples": "u64"}},
+            "help": {"methods": ["GET","POST"], "fields": {}, "returns": "this document"},
+            "health": {"methods": ["GET"], "fields": {}, "returns": {"status": "up"}},
+        },
+        "not_exposed": ["serve", "mcp-server", "mcp-tools"],
+        "note": "learning is load-bearing: recall returns recall_id; reward it (score -1.0..1.0) exactly like the local CLI. Unrewarded remote recall == unrewarded local recall.",
+    })
+}
+
+/// Handle a mirrored CLI endpoint (GET query or POST JSON body).
+async fn handle_mirror(
+    cli: &Arc<Cli>,
+    command: &str,
+    method: &hyper::Method,
+    req: hyper::Request<hyper::body::Incoming>,
+    peer: &str,
+) -> hyper::Response<HttpBody> {
+    if !matches!(*method, hyper::Method::GET | hyper::Method::POST) {
+        return mirror_response(
+            405,
+            serde_json::json!({"ok": false, "error": "method not allowed (use GET or POST)"}),
+        );
+    }
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().map(str::to_string);
+    let mut payload = query_to_json(query.as_deref());
+    if *method == hyper::Method::POST {
+        match http_body_util::BodyExt::collect(req.into_body()).await {
+            Ok(body) => {
+                let bytes = body.to_bytes();
+                if !bytes.is_empty() {
+                    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        Ok(serde_json::Value::Object(map)) => {
+                            if let Some(obj) = payload.as_object_mut() {
+                                for (k, v) in map {
+                                    obj.insert(k, v);
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            return mirror_response(
+                                400,
+                                serde_json::json!({"ok": false, "error": "body must be a JSON object"}),
+                            );
+                        }
+                        Err(e) => {
+                            return mirror_response(
+                                400,
+                                serde_json::json!({"ok": false, "error": format!("bad json: {e}")}),
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                return mirror_response(
+                    400,
+                    serde_json::json!({"ok": false, "error": format!("read body: {e}")}),
+                );
+            }
+        }
+    }
+    // Log every remote call to stdout (host telemetry reads it).
+    eprintln!(
+        "engram-api: {} {} from {} at {}",
+        method,
+        path,
+        peer,
+        chrono::Utc::now().to_rfc3339()
+    );
+    if command == "help" {
+        return mirror_response(200, serde_json::json!({"ok": true, "data": mirror_help()}));
+    }
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("command".to_string(), serde_json::json!(command));
+    }
+    match execute_cli_value(cli, &payload).await {
+        Ok(data) => mirror_response(200, serde_json::json!({"ok": true, "data": data})),
+        Err((status, error)) => {
+            mnemos_telemetry::global().record("mnemos-mcp-http", "mirror", false, &error);
+            mirror_response(status, serde_json::json!({"ok": false, "error": error}))
+        }
+    }
+}
+
+/// JSON response with an explicit HTTP status.
+fn mirror_response(status: u16, value: serde_json::Value) -> hyper::Response<HttpBody> {
+    hyper::Response::builder()
+        .status(hyper::StatusCode::from_u16(status).unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR))
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&value).unwrap_or_default())).boxed())
+        .expect("mirror json response builds")
 }
 
 /// One request against the persistent daemon: auth → local routes
@@ -461,6 +720,7 @@ async fn handle_request(
     cli_service: StreamableHttpService<mnemos_mcp_server::MnemosServer, LocalSessionManager>,
     rpc_cli: Arc<Cli>,
     token: Option<String>,
+    peer: String,
     req: hyper::Request<hyper::body::Incoming>,
 ) -> Result<hyper::Response<HttpBody>, Infallible> {
     if !is_authorized(&req, token.as_deref()) {
@@ -476,6 +736,11 @@ async fn handle_request(
             return Ok(resp);
         }
         return Ok(not_found());
+    }
+    // Mirrored CLI HTTP API (one endpoint per command), in-process.
+    if let Some(command) = mirror_command(clean) {
+        let method = req.method().clone();
+        return Ok(handle_mirror(&rpc_cli, command, &method, req, &peer).await);
     }
     if clean == TOOLS_LIST_PATH {
         if *req.method() != hyper::Method::GET {
@@ -773,6 +1038,8 @@ async fn serve_stream<S>(
     let tools_service = services.tools_service.clone();
     let cli_service = services.cli_service.clone();
     let rpc_cli = Arc::clone(&services.rpc_cli);
+    let peer_label = peer.to_string();
+    let peer_for_closure = peer_label.clone();
     let router = hyper::service::service_fn(
         move |req: hyper::Request<hyper::body::Incoming>| {
             let protocol_service = protocol_service.clone();
@@ -780,12 +1047,14 @@ async fn serve_stream<S>(
             let cli_service = cli_service.clone();
             let rpc_cli = Arc::clone(&rpc_cli);
             let token = token.clone();
+            let peer = peer_for_closure.clone();
             handle_request(
                 protocol_service,
                 tools_service,
                 cli_service,
                 rpc_cli,
                 token,
+                peer,
                 req,
             )
         },
@@ -794,7 +1063,7 @@ async fn serve_stream<S>(
         .serve_connection(io, router)
         .await
     {
-        eprintln!("mnemos-mcp-http connection from {peer} failed: {err}");
+        eprintln!("mnemos-mcp-http connection from {peer_label} failed: {err}");
     }
 }
 
