@@ -24,6 +24,7 @@
 !models/
 !models/**
 !engramapi.txt
+!PROJECT-PLAN.md
 !.env.example
 !README.md
 !LICENSE

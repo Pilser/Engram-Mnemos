@@ -149,7 +149,7 @@ pub fn tools_catalog() -> serde_json::Value {
             {"name": "help", "params": "tool?"}
         ]},
         {"endpoint": "/mcp/cli", "transport": "mcp-streamable-http", "tools": [
-            {"name": "engram_cli", "params": "command*, text?, query?, limit?, prev_id?, seq_pos?, follow_seq?, seq_depth?, seq_dir?, attributions?, score?, recall_id?, args? (commands: help, ingest, recall, reward, consolidate, stats)"}
+            {"name": "engram_cli", "params": "command*, text?, query?, limit?, prev_id?, seq_pos?, follow_seq?, seq_depth?, seq_dir?, attributions?, score?, recall_id?, args? (commands: help, ingest, recall, reward, consolidate, stats, status)"}
         ]}
     ])
 }
