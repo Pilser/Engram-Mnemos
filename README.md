@@ -1,13 +1,18 @@
 # Engram Mnemos (MNEMOS)
 
-> Persistent, **learnable** memory for AI agents — embedded HelixDB + Rust, no server required.
+> Persistent, **learnable** memory for AI agents — embedded graph + vector search, no server required.
 
 [![ci](https://github.com/Pilser/Engram-Mnemos/actions/workflows/ci.yml/badge.svg)](https://github.com/Pilser/Engram-Mnemos/actions/workflows/ci.yml)
 
 Engram Mnemos is a modular Rust workspace (28 crates) that gives an AI agent episodic
-memory that **improves from feedback**. Memories are stored in an embedded HelixDB graph
-(no external database), recalled by resonance, and shaped over time by rewards — so
-relevant memories surface higher and irrelevant ones stop surfacing.
+memory that **improves from feedback**. Memories are stored in an embedded graph,
+recalled by resonance, and shaped over time by rewards — so relevant memories surface
+higher and irrelevant ones stop surfacing.
+
+**Powered by [HelixDB](https://github.com/HelixDB/helix-db)** — an OLTP graph database
+with native vector and full-text search, built in Rust on object storage. Engram uses it
+embedded (in-process, no external database to run), and can also point at a HelixDB
+server, S3-compatible object storage, or in-memory for tests.
 
 One binary (`engram`) exposes the same engine over a **shell CLI**, a **one-to-one HTTP
 API**, and **three MCP surfaces** (for Claude Desktop, Cursor, opencode, …).
@@ -47,7 +52,7 @@ API**, and **three MCP surfaces** (for Claude Desktop, Cursor, opencode, …).
 | **Consolidation ("sleep")** | Decay, prune, compress, promote, plus optional aggressive mitosis + identity + contradiction passes. |
 | **Self-tuning reranker** | A tiny learned reranker (Option B) trains online from every reward and blends in automatically as data accumulates. |
 | **Three interfaces** | Shell CLI, mirrored HTTP API, and MCP (stdio + HTTP) — all sharing one in-process engine. |
-| **Embedded storage** | Disk (default), in-memory, S3-compatible object storage, or a HelixDB HTTP server. |
+| **Embedded storage** | [HelixDB](https://github.com/HelixDB/helix-db) on disk (default), in-memory, S3-compatible object storage, or a HelixDB HTTP server. |
 | **Pluggable providers** | Chat: OpenAI, xAI, DeepSeek, Anthropic, Ollama. Embeddings: OpenAI-compatible or local (fastembed). |
 
 ---
@@ -389,9 +394,9 @@ Set `MNEMOS_TELEMETRY=0` to disable.
 - **CI:** `.github/workflows/ci.yml` builds the release binary on every push to
   `master` and uploads the `engram-linux-x86_64` artifact. (check/clippy/test are
   currently commented out — the release build is the single gate.)
-- **HelixDB:** git dependency on `helixdb/helix-db` (`branch = "main"`,
-  `features = ["embedded"]`), because the published `3.0.0` crate lacks the embedded
-  feature.
+- **HelixDB:** git dependency on [`helixdb/helix-db`](https://github.com/HelixDB/helix-db)
+  (`branch = "main"`, `features = ["embedded"]`), because the published `3.0.0` crate
+  lacks the embedded feature.
 
 ### Workspace (28 crates)
 
